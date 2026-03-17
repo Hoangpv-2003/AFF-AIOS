@@ -216,6 +216,17 @@ class ManagerAgent:
             )
             if not review_result.success:
                 self._on_provider_failure()
+                if review_result.reason_code == "PROVIDER_ERROR":
+                    state = self.transition(state, "REVIEWED_WARN")
+                    transitions.append(state)
+                    state = self.transition(state, "WAITING_APPROVAL")
+                    transitions.append(state)
+                    return ManagerRunResult(
+                        task_id=task_id,
+                        final_state=state,
+                        transitions=transitions,
+                        reason_code="PROVIDER_ERROR",
+                    )
                 state = self.transition(state, "FAILED")
                 transitions.append(state)
                 return ManagerRunResult(
