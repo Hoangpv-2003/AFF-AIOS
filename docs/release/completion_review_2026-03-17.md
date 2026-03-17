@@ -5,7 +5,7 @@ Review against ordered milestones M1-M6 and completion criteria in implementatio
 
 ## Milestone Assessment
 1. M1: Complete.
-2. M2: Partially complete (spike definitions and scripts exist; ADR-002/004/006 still `Draft`).
+2. M2: Complete (spike scripts runnable with evidence artifacts; ADR-002/004/006 accepted).
 3. M3: Complete.
 4. M4: Complete.
 5. M5: Complete.
@@ -18,8 +18,7 @@ Review against ordered milestones M1-M6 and completion criteria in implementatio
 4. Canary rollback policy has simulation tests and production playbooks: PASS.
 
 ## Open Gaps
-1. ADR-002, ADR-004, ADR-006 remain in Draft status and need explicit finalize decision records based on spike measurements.
-2. Plan section for ADR finalization would benefit from artifact links to measured outputs (CSV/JSON/report snapshots) for auditability.
+1. Spike artifacts currently reflect local/simulated workload; production replay datasets can be added later for stronger external audit confidence.
 
 ## Recommendation
-Proceed with merge for implemented phases, then run an ADR finalization pass for 002/004/006 as a focused follow-up change.
+Proceed with merge; create optional hardening follow-up for richer production-like spike datasets.

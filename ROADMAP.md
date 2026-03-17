@@ -69,7 +69,7 @@ Mục tiêu: Xây dựng hệ thống đa tác nhân (Multi-agent) có khả nă
 
 ## Milestone Status (M1-M6)
 - M1: Completed (docs baseline and blocking ADR files present, accepted where required).
-- M2: In Review (spike specs/scripts present; ADR-002/004/006 still marked Draft pending quantitative finalization record).
+- M2: Completed (spike scripts runnable, evidence artifacts recorded, ADR-002/004/006 accepted).
 - M3: Completed (foundation + draft/stable API + contract tests green).
 - M4: Completed (memory adapters + manager robust state machine tests green).
 - M5: Completed (registry/approval/reconciliation/sandbox/budget tests green).

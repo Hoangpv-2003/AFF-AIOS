@@ -1,0 +1,9 @@
+{
+  "scenario": "sandbox_offline",
+  "runs": 30,
+  "startup_p95_ms": 0,
+  "outbound_attempted": true,
+  "outbound_blocked": true,
+  "pass_rate": 1.0,
+  "status": "ok"
+}

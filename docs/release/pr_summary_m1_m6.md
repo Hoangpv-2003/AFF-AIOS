@@ -26,5 +26,18 @@
 5. Confirm budget cutoff and kill switch semantics match operational expectations.
 
 ## Suggested Follow-up PR
-1. ADR finalization PR for 002/004/006 with attached spike evidence.
-2. Optional enhancement PR for CI artifact upload/report publishing.
+1. Optional enhancement PR for CI artifact upload/report publishing.
+
+## Follow-up PR Completed (ADR Finalization)
+1. Implemented runnable spike scripts:
+	- `scripts/spikes/sandbox_smoke.py`
+	- `scripts/spikes/queue_load_sim.py`
+	- `scripts/spikes/agent_contract_smoke.py`
+2. Generated evidence artifacts:
+	- `docs/adr/evidence/s1_sandbox_offline_2026-03-17.json`
+	- `docs/adr/evidence/s2_queue_latency_2026-03-17.json`
+	- `docs/adr/evidence/s3_agent_contract_2026-03-17.json`
+3. Finalized ADR status to `Accepted` for:
+	- `docs/adr/ADR-002-queue-sla.md`
+	- `docs/adr/ADR-004-skill-reconciliation.md`
+	- `docs/adr/ADR-006-tracing-boundary.md`

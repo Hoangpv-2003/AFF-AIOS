@@ -1,0 +1,11 @@
+{
+  "scenario": "queue_latency",
+  "concurrency": 20,
+  "batch_backlog": 100,
+  "interactive_p50_ms": 0.001,
+  "interactive_p95_ms": 0.002,
+  "interactive_p99_ms": 0.002,
+  "admission_accepted": true,
+  "admission_reason": "ACCEPTED",
+  "status": "ok"
+}

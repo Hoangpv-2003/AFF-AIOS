@@ -1,0 +1,7 @@
+{
+  "scenario": "agent_contract",
+  "samples": 3,
+  "plan_schema_pass_rate": 1.0,
+  "verdict_parse_rate": 1.0,
+  "status": "ok"
+}
