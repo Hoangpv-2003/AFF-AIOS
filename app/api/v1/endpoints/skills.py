@@ -68,3 +68,26 @@ async def quarantine_skill(skill_id: str):
     except SkillTransitionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_manifest(quarantined)
+
+
+@router.post("/{skill_id}/recover", response_model=SkillManifestDraft)
+async def recover_skill(skill_id: str):
+    if registry.get(skill_id) is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    try:
+        recovered = registry.recover(skill_id)
+    except SkillTransitionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_manifest(recovered)
+
+
+@router.post("/{skill_id}/execute")
+async def execute_skill(skill_id: str):
+    item = registry.get(skill_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    if item.status == SkillState.quarantined:
+        raise HTTPException(status_code=423, detail="Skill is quarantined due to detected drift")
+    if item.status != SkillState.active:
+        raise HTTPException(status_code=400, detail="Skill must be active before execute")
+    return {"skill_id": skill_id, "status": "executed"}

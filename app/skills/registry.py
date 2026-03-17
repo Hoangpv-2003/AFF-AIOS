@@ -30,7 +30,7 @@ class SkillRegistry:
 		SkillState.reviewed: {SkillState.approved, SkillState.quarantined, SkillState.deprecated},
 		SkillState.approved: {SkillState.active, SkillState.quarantined, SkillState.deprecated},
 		SkillState.active: {SkillState.quarantined, SkillState.deprecated},
-		SkillState.quarantined: {SkillState.reviewed, SkillState.deprecated},
+		SkillState.quarantined: {SkillState.reviewed, SkillState.approved, SkillState.deprecated},
 		SkillState.deprecated: set(),
 	}
 
@@ -73,6 +73,16 @@ class SkillRegistry:
 		if record.status != SkillState.approved:
 			raise SkillTransitionError("Skill must be approved before activation")
 		return self.transition(skill_id, SkillState.active)
+
+	def recover(self, skill_id: str, target_state: SkillState = SkillState.reviewed) -> SkillRecord:
+		record = self._skills.get(skill_id)
+		if record is None:
+			raise SkillTransitionError("Skill not found")
+		if record.status != SkillState.quarantined:
+			raise SkillTransitionError("Only quarantined skills can be recovered")
+		if target_state not in {SkillState.reviewed, SkillState.approved}:
+			raise SkillTransitionError("Recovery target must be reviewed or approved")
+		return self.transition(skill_id, target_state)
 
 
 registry = SkillRegistry()

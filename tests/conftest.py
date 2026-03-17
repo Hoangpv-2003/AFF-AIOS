@@ -3,8 +3,11 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.v1.endpoints.approvals import _APPROVALS
 from app.core.config import Settings
+from app.infrastructure.reconciliation.reconcile_service import reconciliation_service
 from app.main import create_app
+from app.skills.registry import registry
 
 
 @pytest.fixture()
@@ -27,3 +30,10 @@ def fake_settings() -> Settings:
         vector_provider="chroma",
         queue_provider="redis_rq",
     )
+
+
+@pytest.fixture(autouse=True)
+def reset_in_memory_state() -> None:
+    _APPROVALS.clear()
+    registry._skills.clear()
+    reconciliation_service.reset()
