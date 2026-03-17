@@ -5,11 +5,16 @@ from __future__ import annotations
 from typing import Dict
 
 from app.agents.base_agent import AgentContext, AgentResult, BaseAgent
+from app.infrastructure.sandboxes.models import SandboxRequest
+from app.infrastructure.sandboxes.runner import LocalSandboxRunner
 from app.schemas.agents import CoderArtifactDraft, ReviewStatus, ReviewVerdictDraft
 
 
 class ReviewerAgent(BaseAgent):
 	name = "reviewer"
+
+	def __init__(self, sandbox_runner: LocalSandboxRunner | None = None) -> None:
+		self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
 
 	def review_artifacts(self, artifacts: CoderArtifactDraft) -> ReviewVerdictDraft:
 		if not artifacts.files:
@@ -23,6 +28,22 @@ class ReviewerAgent(BaseAgent):
 				status=ReviewStatus.fail,
 				reason_code="SANDBOX_DENIED",
 				notes="Unsafe patterns detected",
+			)
+
+		requires_network = "http" in artifacts.rationale.lower() or "network" in artifacts.rationale.lower()
+		result = self.sandbox_runner.run(
+			SandboxRequest(
+				skill_id="review-artifacts",
+				command="python",
+				args=artifacts.files,
+				requires_network=requires_network,
+			)
+		)
+		if not result.success:
+			return ReviewVerdictDraft(
+				status=ReviewStatus.fail,
+				reason_code="SANDBOX_DENIED",
+				notes=result.stderr,
 			)
 		return ReviewVerdictDraft(status=ReviewStatus.pass_)
 
