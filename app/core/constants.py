@@ -3,6 +3,7 @@
 API_V1_PREFIX = "/api/v1"
 
 REQUEST_ID_HEADER = "X-Request-Id"
+TRACE_ID_HEADER = "X-Trace-Id"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 
 QUEUE_CLASSES = ("interactive", "standard", "batch")

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.api.v1.endpoints.approvals import _APPROVALS
 from app.core.config import Settings
+from app.infrastructure.observability.tracing import get_tracer
 from app.infrastructure.reconciliation.reconcile_service import reconciliation_service
 from app.main import create_app
 from app.skills.registry import registry
@@ -37,3 +38,4 @@ def reset_in_memory_state() -> None:
     _APPROVALS.clear()
     registry._skills.clear()
     reconciliation_service.reset()
+    get_tracer().clear()
