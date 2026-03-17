@@ -1,5 +1,9 @@
 """Approval endpoints."""
 
+from __future__ import annotations
+
+from time import time
+
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.approvals import ApprovalDecision, ApprovalRequestDraft, ApprovalStatus
@@ -16,6 +20,9 @@ async def submit_approval(payload: ApprovalRequestDraft):
         "task_id": payload.task_id,
         "skill_id": payload.skill_id,
         "status": ApprovalStatus.pending,
+        "requested_at": time(),
+        "expires_at": None,
+        "escalated_to": None,
     }
     return _APPROVALS[approval_id]
 
@@ -35,6 +42,7 @@ async def escalate_approval(approval_id: str):
     if approval_id not in _APPROVALS:
         raise HTTPException(status_code=404, detail="Approval not found")
     _APPROVALS[approval_id]["status"] = ApprovalStatus.escalated
+    _APPROVALS[approval_id]["escalated_to"] = "fallback_reviewer"
     return _APPROVALS[approval_id]
 
 
@@ -43,4 +51,16 @@ async def expire_approval(approval_id: str):
     if approval_id not in _APPROVALS:
         raise HTTPException(status_code=404, detail="Approval not found")
     _APPROVALS[approval_id]["status"] = ApprovalStatus.expired
+    _APPROVALS[approval_id]["expires_at"] = time()
     return _APPROVALS[approval_id]
+
+
+def get_approval(approval_id: str) -> dict | None:
+    return _APPROVALS.get(approval_id)
+
+
+def is_approval_valid(approval_id: str) -> bool:
+    approval = get_approval(approval_id)
+    if approval is None:
+        return False
+    return approval.get("status") == ApprovalStatus.approved

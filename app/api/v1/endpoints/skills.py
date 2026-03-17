@@ -2,41 +2,69 @@
 
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.skills import SkillManifestDraft, SkillState
+from app.api.v1.endpoints.approvals import is_approval_valid
+from app.schemas.skills import SkillManifestDraft, SkillRegisterRequest, SkillState
+from app.skills.registry import SkillRecord, SkillTransitionError, registry
 
 router = APIRouter()
-_SKILLS: dict[str, SkillManifestDraft] = {}
+
+
+def _to_manifest(record: SkillRecord) -> SkillManifestDraft:
+    return SkillManifestDraft(
+        skill_id=record.skill_id,
+        version=record.version,
+        state=record.status,
+        digest=record.digest,
+        source_task_id=record.source_task_id,
+        approval_id=record.approval_id,
+        activated_at=record.activated_at,
+    )
+
+
+@router.post("/register", response_model=SkillManifestDraft)
+async def register_skill(payload: SkillRegisterRequest):
+    record = SkillRecord(
+        skill_id=payload.skill_id,
+        version=payload.version,
+        digest=payload.digest,
+        source_task_id=payload.source_task_id,
+        approval_id=payload.approval_id,
+        status=payload.status,
+    )
+    return _to_manifest(registry.register(record))
 
 
 @router.get("", response_model=list[SkillManifestDraft])
 async def list_skills():
-    return list(_SKILLS.values())
+    return [_to_manifest(item) for item in registry.list()]
 
 
 @router.get("/{skill_id}", response_model=SkillManifestDraft)
 async def get_skill(skill_id: str):
-    if skill_id not in _SKILLS:
+    item = registry.get(skill_id)
+    if item is None:
         raise HTTPException(status_code=404, detail="Skill not found")
-    return _SKILLS[skill_id]
+    return _to_manifest(item)
 
 
 @router.post("/{skill_id}/activate", response_model=SkillManifestDraft)
 async def activate_skill(skill_id: str):
-    if skill_id not in _SKILLS:
+    item = registry.get(skill_id)
+    if item is None:
         raise HTTPException(status_code=404, detail="Skill not found")
-    skill = _SKILLS[skill_id]
-    if skill.state not in {SkillState.approved, SkillState.reviewed}:
-        raise HTTPException(status_code=400, detail="Skill is not approved")
-    skill.state = SkillState.active
-    _SKILLS[skill_id] = skill
-    return skill
+    try:
+        activated = registry.activate(skill_id, is_approval_valid(item.approval_id))
+    except SkillTransitionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_manifest(activated)
 
 
 @router.post("/{skill_id}/quarantine", response_model=SkillManifestDraft)
 async def quarantine_skill(skill_id: str):
-    if skill_id not in _SKILLS:
+    if registry.get(skill_id) is None:
         raise HTTPException(status_code=404, detail="Skill not found")
-    skill = _SKILLS[skill_id]
-    skill.state = SkillState.quarantined
-    _SKILLS[skill_id] = skill
-    return skill
+    try:
+        quarantined = registry.transition(skill_id, SkillState.quarantined)
+    except SkillTransitionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_manifest(quarantined)

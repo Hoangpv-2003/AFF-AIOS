@@ -27,3 +27,15 @@ class SkillManifestDraft(BaseModel):
     version: str
     state: SkillState = SkillState.draft
     digest: Optional[SkillDigest] = None
+    source_task_id: Optional[str] = None
+    approval_id: Optional[str] = None
+    activated_at: Optional[float] = None
+
+
+class SkillRegisterRequest(BaseModel):
+    skill_id: str
+    version: str
+    digest: SkillDigest
+    source_task_id: str
+    approval_id: str
+    status: SkillState = SkillState.draft
