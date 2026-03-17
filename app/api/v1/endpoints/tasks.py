@@ -6,6 +6,7 @@ from typing import Optional, Union
 
 from fastapi import APIRouter, Header, HTTPException, Response
 
+from app.infrastructure.budget.kill_switch import runtime_kill_switch
 from app.schemas.tasks import TaskCreate, TaskCreateDraft, TaskState, TaskStatus
 
 router = APIRouter()
@@ -34,6 +35,12 @@ async def create_task(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     schema_mode: Optional[str] = Header(default=None, alias="X-AAF-Schema"),
 ):
+    if runtime_kill_switch.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Task creation disabled by kill switch: {runtime_kill_switch.reason()}",
+        )
+
     _to_task_create(payload)
     if schema_mode == _DRAFT_SCHEMA_TOKEN:
         _apply_draft_deprecation_headers(response)

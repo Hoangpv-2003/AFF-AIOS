@@ -4,29 +4,18 @@ from dataclasses import dataclass
 
 from fastapi import Depends
 
+from app.agents.coder import CoderAgent
+from app.brain.planner import PlannerAgent
 from app.core.config import Settings, get_settings
 from app.core.security import AuthContext
 from app.infrastructure.database.chroma_store import ChromaMemoryStore
+from app.infrastructure.budget.enforcer import BudgetEnforcer
 from app.infrastructure.queue.redis_rq_client import RedisRQQueueClient
 
 
 @dataclass
 class MockClient:
     provider: str
-
-
-@dataclass
-class BudgetEnforcer:
-    task_limit: int
-    user_limit: int
-    org_limit: int
-
-    def check(self, tokens: int) -> bool:
-        return (
-            tokens <= self.task_limit
-            and tokens <= self.user_limit
-            and tokens <= self.org_limit
-        )
 
 
 def get_settings_dep() -> Settings:
@@ -59,6 +48,18 @@ def get_budget_enforcer(
         user_limit=settings.budget_user_limit,
         org_limit=settings.budget_org_limit,
     )
+
+
+def get_planner_agent(
+    budget_enforcer: BudgetEnforcer = Depends(get_budget_enforcer),
+) -> PlannerAgent:
+    return PlannerAgent(budget_enforcer=budget_enforcer)
+
+
+def get_coder_agent(
+    budget_enforcer: BudgetEnforcer = Depends(get_budget_enforcer),
+) -> CoderAgent:
+    return CoderAgent(budget_enforcer=budget_enforcer)
 
 
 def get_auth_context() -> AuthContext:
