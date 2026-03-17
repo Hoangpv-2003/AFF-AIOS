@@ -58,6 +58,23 @@ Mục tiêu: Xây dựng hệ thống đa tác nhân (Multi-agent) có khả nă
 - Gate 3: Contract tests cho API nền phải pass.
 - Gate 4: Control-plane tests (approval, sandbox, budget, reconciliation) phải có happy-path và failure-path.
 
+## Implementation Status (2026-03-17)
+- Test baseline: `39 passed` (`pytest -q`, workspace venv).
+- Phase status:
+  - Phase 1A/1B/1C: Completed.
+  - Phase 2A/2B/2C: Completed.
+  - Phase 3A/3B/3C: Completed.
+  - Phase 4A/4B/4C: Completed.
+  - Phase 5A/5B: Completed.
+
+## Milestone Status (M1-M6)
+- M1: Completed (docs baseline and blocking ADR files present, accepted where required).
+- M2: In Review (spike specs/scripts present; ADR-002/004/006 still marked Draft pending quantitative finalization record).
+- M3: Completed (foundation + draft/stable API + contract tests green).
+- M4: Completed (memory adapters + manager robust state machine tests green).
+- M5: Completed (registry/approval/reconciliation/sandbox/budget tests green).
+- M6: Completed (observability + CI gates + canary simulation implemented and tested).
+
 ---
 
 ## Kiến trúc Hệ thống (Clean Architecture & DDD)
