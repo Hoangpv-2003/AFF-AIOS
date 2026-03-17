@@ -41,6 +41,25 @@ Mục tiêu: Xây dựng hệ thống đa tác nhân (Multi-agent) có khả nă
 
 ---
 
+## MVP Scope (Khóa phạm vi)
+- In-scope:
+  - Một pipeline chính: `task -> plan -> code -> review -> approve -> register`.
+  - Single-tenant runtime.
+  - API tối thiểu cho `tasks`, `skills`, `approvals`, `traces`.
+  - Sandbox chạy được ở chế độ offline.
+- Non-goals:
+  - Multi-tenant.
+  - Auto-approve production skills.
+  - Tối ưu cost nâng cao ngoài hard-limit.
+
+## Release Gates
+- Gate 1: ADR-001, ADR-003, ADR-005 phải được approve trước code production.
+- Gate 2: Spikes có pass/fail số liệu để finalize ADR-002/004/006.
+- Gate 3: Contract tests cho API nền phải pass.
+- Gate 4: Control-plane tests (approval, sandbox, budget, reconciliation) phải có happy-path và failure-path.
+
+---
+
 ## Kiến trúc Hệ thống (Clean Architecture & DDD)
 
 ```text

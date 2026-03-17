@@ -49,3 +49,19 @@ Trong dự án AAF-AIOS, chúng ta không viết toàn bộ hệ thống ngay t�
 
 ## Tóm lại
 Với AAF-AIOS, lập trình viên chuyển vai trò từ "Thợ gõ phím" sang "Kiến trúc sư trưởng". Các Agent trở thành công cụ đắc lực giải quyết chi tiết. Càng tạo nhiều Skill rõ ràng (`SKILL.md`), hệ thống càng tích lũy lượng "Kiến thức nội bộ" nhanh và code càng ít lỗi.
+
+---
+
+## Glossary
+- `task`: yêu cầu công việc ở mức người dùng hoặc hệ thống gửi vào pipeline.
+- `plan`: kết quả decomposition từ Planner, gồm steps và phụ thuộc.
+- `run`: một lần thực thi pipeline hoặc một bước của pipeline có trạng thái và kết quả riêng.
+- `trace`: chuỗi sự kiện có correlation id để theo dõi end-to-end.
+- `skill`: artifact có thể tái sử dụng (code + metadata + approval state).
+- `approval`: quyết định của con người/hệ thống để cho phép activate skill.
+
+## Contract Lifecycle
+1. Giai đoạn đầu dùng schema hậu tố `Draft` để giảm rủi ro khóa contract quá sớm.
+2. Sau khi spike agent-contract ổn định và integration tests pass, tạo schema `Stable` (không hậu tố).
+3. Duy trì compatibility window cho `Draft` trong một release cycle.
+4. Loại bỏ `Draft` khi telemetry xác nhận usage về 0.
