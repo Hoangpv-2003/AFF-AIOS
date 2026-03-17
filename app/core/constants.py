@@ -7,6 +7,24 @@ IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 
 QUEUE_CLASSES = ("interactive", "standard", "batch")
 
+SLA_TARGET_MS = {
+    "interactive": 500,
+    "standard": 1500,
+    "batch": 5000,
+}
+
+ADMISSION_DEPTH_THRESHOLDS = {
+    "interactive": 2000,
+    "standard": 1000,
+    "batch": 500,
+}
+
+ADMISSION_REASON_CODES = {
+    "accepted": "ACCEPTED",
+    "queue_overloaded": "QUEUE_OVERLOADED",
+    "invalid_priority": "INVALID_PRIORITY",
+}
+
 TASK_STATES = (
     "RECEIVED",
     "PLANNED",
@@ -26,6 +44,7 @@ REASON_CODES = (
     "SANDBOX_DENIED",
     "VALIDATION_FAILED",
     "PROVIDER_ERROR",
+    "QUEUE_OVERLOADED",
     "USER_CANCELLED",
 )
 

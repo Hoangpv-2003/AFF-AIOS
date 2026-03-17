@@ -7,6 +7,7 @@ from fastapi import Depends
 from app.core.config import Settings, get_settings
 from app.core.security import AuthContext
 from app.infrastructure.database.chroma_store import ChromaMemoryStore
+from app.infrastructure.queue.redis_rq_client import RedisRQQueueClient
 
 
 @dataclass
@@ -46,8 +47,8 @@ def get_vector_store(
 
 def get_queue_client(
     settings: Settings = Depends(get_settings_dep),
-) -> MockClient:
-    return MockClient(provider=settings.queue_provider)
+) -> RedisRQQueueClient:
+    return RedisRQQueueClient()
 
 
 def get_budget_enforcer(
