@@ -1,4 +1,4 @@
-"""Task draft schemas."""
+"""Task schemas with draft compatibility window."""
 
 from enum import Enum
 from typing import Optional
@@ -25,12 +25,20 @@ class TaskState(str, Enum):
     cancelled = "CANCELLED"
 
 
-class TaskCreateDraft(BaseModel):
+class TaskCreate(BaseModel):
     prompt: str = Field(min_length=1)
     priority: TaskPriority = TaskPriority.standard
 
 
-class TaskStatusDraft(BaseModel):
+class TaskStatus(BaseModel):
     task_id: str
     state: TaskState
     reason_code: Optional[str] = None
+
+
+class TaskCreateDraft(TaskCreate):
+    """Backward-compatible request model for draft clients."""
+
+
+class TaskStatusDraft(TaskStatus):
+    """Backward-compatible response model for draft clients."""

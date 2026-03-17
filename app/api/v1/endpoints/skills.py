@@ -1,16 +1,26 @@
-"""Skill endpoints."""
+"""Skill endpoints with stable schema and draft compatibility headers."""
 
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, Header, HTTPException, Response
 
 from app.api.v1.endpoints.approvals import is_approval_valid
-from app.schemas.skills import SkillManifestDraft, SkillRegisterRequest, SkillState
+from app.schemas.skills import SkillManifest, SkillRegisterRequest, SkillState
 from app.skills.registry import SkillRecord, SkillTransitionError, registry
 
 router = APIRouter()
 
+_DRAFT_SCHEMA_TOKEN = "draft"
 
-def _to_manifest(record: SkillRecord) -> SkillManifestDraft:
-    return SkillManifestDraft(
+
+def _apply_draft_deprecation_headers(response: Response) -> None:
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Wed, 30 Sep 2026 00:00:00 GMT"
+    response.headers["X-AAF-Migration"] = "draft->stable"
+
+
+def _to_manifest(record: SkillRecord) -> SkillManifest:
+    return SkillManifest(
         skill_id=record.skill_id,
         version=record.version,
         state=record.status,
@@ -21,8 +31,14 @@ def _to_manifest(record: SkillRecord) -> SkillManifestDraft:
     )
 
 
-@router.post("/register", response_model=SkillManifestDraft)
-async def register_skill(payload: SkillRegisterRequest):
+@router.post("/register", response_model=SkillManifest)
+async def register_skill(
+    payload: SkillRegisterRequest,
+    response: Response,
+    schema_mode: Optional[str] = Header(default=None, alias="X-AAF-Schema"),
+):
+    if schema_mode == _DRAFT_SCHEMA_TOKEN:
+        _apply_draft_deprecation_headers(response)
     record = SkillRecord(
         skill_id=payload.skill_id,
         version=payload.version,
@@ -34,12 +50,12 @@ async def register_skill(payload: SkillRegisterRequest):
     return _to_manifest(registry.register(record))
 
 
-@router.get("", response_model=list[SkillManifestDraft])
+@router.get("", response_model=list[SkillManifest])
 async def list_skills():
     return [_to_manifest(item) for item in registry.list()]
 
 
-@router.get("/{skill_id}", response_model=SkillManifestDraft)
+@router.get("/{skill_id}", response_model=SkillManifest)
 async def get_skill(skill_id: str):
     item = registry.get(skill_id)
     if item is None:
@@ -47,7 +63,7 @@ async def get_skill(skill_id: str):
     return _to_manifest(item)
 
 
-@router.post("/{skill_id}/activate", response_model=SkillManifestDraft)
+@router.post("/{skill_id}/activate", response_model=SkillManifest)
 async def activate_skill(skill_id: str):
     item = registry.get(skill_id)
     if item is None:
@@ -59,7 +75,7 @@ async def activate_skill(skill_id: str):
     return _to_manifest(activated)
 
 
-@router.post("/{skill_id}/quarantine", response_model=SkillManifestDraft)
+@router.post("/{skill_id}/quarantine", response_model=SkillManifest)
 async def quarantine_skill(skill_id: str):
     if registry.get(skill_id) is None:
         raise HTTPException(status_code=404, detail="Skill not found")
@@ -70,7 +86,7 @@ async def quarantine_skill(skill_id: str):
     return _to_manifest(quarantined)
 
 
-@router.post("/{skill_id}/recover", response_model=SkillManifestDraft)
+@router.post("/{skill_id}/recover", response_model=SkillManifest)
 async def recover_skill(skill_id: str):
     if registry.get(skill_id) is None:
         raise HTTPException(status_code=404, detail="Skill not found")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Skill draft schemas."""
+"""Skill schemas with draft compatibility window."""
 
 from enum import Enum
 from typing import Optional
@@ -22,7 +22,7 @@ class SkillDigest(BaseModel):
     value: str
 
 
-class SkillManifestDraft(BaseModel):
+class SkillManifest(BaseModel):
     skill_id: str
     version: str
     state: SkillState = SkillState.draft
@@ -30,6 +30,10 @@ class SkillManifestDraft(BaseModel):
     source_task_id: Optional[str] = None
     approval_id: Optional[str] = None
     activated_at: Optional[float] = None
+
+
+class SkillManifestDraft(SkillManifest):
+    """Backward-compatible response model for draft clients."""
 
 
 class SkillRegisterRequest(BaseModel):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Agent draft contracts."""
+"""Agent schemas with draft compatibility window."""
 
 from enum import Enum
 from typing import Optional
@@ -14,18 +14,30 @@ class ReviewStatus(str, Enum):
     fail = "fail"
 
 
-class PlanDraft(BaseModel):
+class Plan(BaseModel):
     objective: str
     steps: list[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 
-class CoderArtifactDraft(BaseModel):
+class CoderArtifact(BaseModel):
     files: list[str] = Field(default_factory=list)
     rationale: str
 
 
-class ReviewVerdictDraft(BaseModel):
+class ReviewVerdict(BaseModel):
     status: ReviewStatus
     reason_code: Optional[str] = None
     notes: Optional[str] = None
+
+
+class PlanDraft(Plan):
+    """Backward-compatible plan model for draft clients."""
+
+
+class CoderArtifactDraft(CoderArtifact):
+    """Backward-compatible coder artifact model for draft clients."""
+
+
+class ReviewVerdictDraft(ReviewVerdict):
+    """Backward-compatible review verdict model for draft clients."""

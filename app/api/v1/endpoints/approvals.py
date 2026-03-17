@@ -3,17 +3,32 @@
 from __future__ import annotations
 
 from time import time
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Response
 
-from app.schemas.approvals import ApprovalDecision, ApprovalRequestDraft, ApprovalStatus
+from app.schemas.approvals import ApprovalDecision, ApprovalRequest, ApprovalStatus
 
 router = APIRouter()
 _APPROVALS: dict[str, dict] = {}
 
+_DRAFT_SCHEMA_TOKEN = "draft"
+
+
+def _apply_draft_deprecation_headers(response: Response) -> None:
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Wed, 30 Sep 2026 00:00:00 GMT"
+    response.headers["X-AAF-Migration"] = "draft->stable"
+
 
 @router.post("/submit")
-async def submit_approval(payload: ApprovalRequestDraft):
+async def submit_approval(
+    payload: ApprovalRequest,
+    response: Response,
+    schema_mode: Optional[str] = Header(default=None, alias="X-AAF-Schema"),
+):
+    if schema_mode == _DRAFT_SCHEMA_TOKEN:
+        _apply_draft_deprecation_headers(response)
     approval_id = f"approval-{len(_APPROVALS) + 1}"
     _APPROVALS[approval_id] = {
         "approval_id": approval_id,

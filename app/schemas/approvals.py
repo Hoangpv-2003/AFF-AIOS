@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Approval draft schemas."""
+"""Approval schemas with draft compatibility window."""
 
 from enum import Enum
 from typing import Optional
@@ -21,8 +21,12 @@ class ApprovalStatus(str, Enum):
     escalated = "escalated"
 
 
-class ApprovalRequestDraft(BaseModel):
+class ApprovalRequest(BaseModel):
     task_id: str
     skill_id: str
     requested_by: str
     reason: Optional[str] = None
+
+
+class ApprovalRequestDraft(ApprovalRequest):
+    """Backward-compatible request model for draft clients."""
