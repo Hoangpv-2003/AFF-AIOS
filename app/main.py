@@ -5,13 +5,18 @@ from __future__ import annotations
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
 from app.core.constants import REQUEST_ID_HEADER, TRACE_ID_HEADER
-from app.infrastructure.observability.tracing import configure_tracer, get_tracer
+from app.infrastructure.observability.tracing import (
+    configure_tracer,
+    get_tracer,
+)
 
 
 def create_app() -> FastAPI:
@@ -66,7 +71,10 @@ def create_app() -> FastAPI:
         tracer.end_span(
             root_span_id,
             status="ok",
-            attributes={"status_code": response.status_code, "elapsed_ms": elapsed_ms},
+            attributes={
+                "status_code": response.status_code,
+                "elapsed_ms": elapsed_ms,
+            },
         )
         response.headers[REQUEST_ID_HEADER] = request_id
         response.headers[TRACE_ID_HEADER] = trace_id
@@ -83,9 +91,28 @@ def create_app() -> FastAPI:
         status = "ready" if started else "not_ready"
         return {"status": status}
 
+    frontend_dir = Path(__file__).resolve().parent / "frontend"
+    if frontend_dir.exists():
+        app.mount(
+            "/frontend",
+            StaticFiles(directory=str(frontend_dir), html=True),
+            name="frontend",
+        )
+
+    reports_dir = Path(__file__).resolve().parents[1] / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    app.mount(
+        "/reports",
+        StaticFiles(directory=str(reports_dir), html=False),
+        name="reports",
+    )
+
+    @app.get("/")
+    async def root() -> RedirectResponse:
+        return RedirectResponse(url="/frontend")
+
     app.include_router(api_router)
     return app
 
 
 app = create_app()
-

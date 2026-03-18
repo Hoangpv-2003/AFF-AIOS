@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app.agents.base_agent import AgentContext
 from app.agents.coder import CoderAgent
@@ -23,6 +23,7 @@ class ManagerRunResult:
     final_state: str
     transitions: List[str] = field(default_factory=list)
     reason_code: Optional[str] = None
+    execution_log: List[Dict[str, object]] = field(default_factory=list)
 
 
 class ManagerAgent:
@@ -103,8 +104,17 @@ class ManagerAgent:
         fail_at_state: Optional[str] = None,
     ) -> ManagerRunResult:
         transitions: List[str] = []
+        execution_log: List[Dict[str, object]] = []
         state = "RECEIVED"
         transitions.append(state)
+        execution_log.append(
+            {
+                "stage": "received",
+                "state": state,
+                "prompt": prompt,
+                "priority": priority,
+            }
+        )
 
         allowed, admission_code = self.evaluate_admission(priority)
         if not allowed:
@@ -115,6 +125,7 @@ class ManagerAgent:
                 final_state=state,
                 transitions=transitions,
                 reason_code=admission_code,
+                execution_log=execution_log,
             )
 
         routed_priority = self.route_priority(priority)
@@ -141,6 +152,7 @@ class ManagerAgent:
                     final_state=state,
                     transitions=transitions,
                     reason_code="USER_CANCELLED",
+                    execution_log=execution_log,
                 )
             if fail_at_state == next_state:
                 state = self.transition(state, "FAILED")
@@ -150,6 +162,7 @@ class ManagerAgent:
                     final_state=state,
                     transitions=transitions,
                     reason_code="TIMEOUT",
+                    execution_log=execution_log,
                 )
             return None
 
@@ -163,6 +176,14 @@ class ManagerAgent:
             self._before_provider_call()
             plan_result = self.planner.act(context, {"prompt": prompt})
             self._on_provider_success()
+            execution_log.append(
+                {
+                    "stage": "planner",
+                    "success": plan_result.success,
+                    "reason_code": plan_result.reason_code,
+                    "payload": plan_result.payload,
+                }
+            )
         except RuntimeError:
             self._on_provider_failure()
             state = self.transition(state, "FAILED")
@@ -172,6 +193,7 @@ class ManagerAgent:
                 state,
                 transitions,
                 "PROVIDER_ERROR",
+                execution_log=execution_log,
             )
 
         if not plan_result.success:
@@ -183,6 +205,7 @@ class ManagerAgent:
                 state,
                 transitions,
                 plan_result.reason_code,
+                execution_log=execution_log,
             )
         plan_payload = (plan_result.payload or {}).get("plan", {})
 
@@ -198,6 +221,14 @@ class ManagerAgent:
                 context,
                 {"plan": plan_payload, "memory_hits": []},
             )
+            execution_log.append(
+                {
+                    "stage": "coder",
+                    "success": code_result.success,
+                    "reason_code": code_result.reason_code,
+                    "payload": code_result.payload,
+                }
+            )
             if not code_result.success:
                 self._on_provider_failure()
                 state = self.transition(state, "FAILED")
@@ -207,12 +238,21 @@ class ManagerAgent:
                     state,
                     transitions,
                     code_result.reason_code,
+                    execution_log=execution_log,
                 )
             artifacts = (code_result.payload or {}).get("artifacts", {})
 
             review_result = self.reviewer.act(
                 context,
                 {"artifacts": artifacts},
+            )
+            execution_log.append(
+                {
+                    "stage": "reviewer",
+                    "success": review_result.success,
+                    "reason_code": review_result.reason_code,
+                    "payload": review_result.payload,
+                }
             )
             if not review_result.success:
                 self._on_provider_failure()
@@ -226,6 +266,7 @@ class ManagerAgent:
                         final_state=state,
                         transitions=transitions,
                         reason_code="PROVIDER_ERROR",
+                        execution_log=execution_log,
                     )
                 state = self.transition(state, "FAILED")
                 transitions.append(state)
@@ -234,6 +275,7 @@ class ManagerAgent:
                     state,
                     transitions,
                     review_result.reason_code,
+                    execution_log=execution_log,
                 )
             verdict = (review_result.payload or {}).get("verdict", {})
             status = verdict.get("status")
@@ -245,7 +287,12 @@ class ManagerAgent:
                 transitions.append(state)
                 state = self.transition(state, "WAITING_APPROVAL")
                 transitions.append(state)
-                return ManagerRunResult(task_id, state, transitions)
+                return ManagerRunResult(
+                    task_id,
+                    state,
+                    transitions,
+                    execution_log=execution_log,
+                )
 
             if status == ReviewStatus.warn.value:
                 state = self.transition(state, "REVIEWED_WARN")
@@ -260,6 +307,7 @@ class ManagerAgent:
                     final_state=state,
                     transitions=transitions,
                     reason_code=reason or "VALIDATION_FAILED",
+                    execution_log=execution_log,
                 )
 
             state = self.transition(state, "FAILED")
@@ -269,4 +317,5 @@ class ManagerAgent:
                 final_state=state,
                 transitions=transitions,
                 reason_code=reason or "VALIDATION_FAILED",
+                execution_log=execution_log,
             )

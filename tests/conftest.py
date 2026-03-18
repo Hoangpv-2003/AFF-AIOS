@@ -9,7 +9,9 @@ from app.core.config import Settings
 from app.infrastructure.budget.budget_ledger import budget_ledger
 from app.infrastructure.budget.kill_switch import runtime_kill_switch
 from app.infrastructure.observability.tracing import get_tracer
-from app.infrastructure.reconciliation.reconcile_service import reconciliation_service
+from app.infrastructure.reconciliation.reconcile_service import (
+    reconciliation_service,
+)
 from app.main import create_app
 from app.skills.registry import registry
 
@@ -30,7 +32,6 @@ def fake_settings() -> Settings:
     return Settings(
         environment="test",
         debug=True,
-        llm_provider="mock",
         vector_provider="chroma",
         queue_provider="redis_rq",
     )

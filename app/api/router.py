@@ -2,11 +2,20 @@
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import agents, approvals, skills, skills_reconciliation, tasks, traces
+from app.api.v1.endpoints import (
+	agents,
+	approvals,
+	auth,
+	skills,
+	skills_reconciliation,
+	tasks,
+	traces,
+)
 from app.core.constants import API_V1_PREFIX
 
 
 api_router = APIRouter(prefix=API_V1_PREFIX)
+api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(agents.router, prefix="/agents", tags=["agents"])
 api_router.include_router(skills.router, prefix="/skills", tags=["skills"])
