@@ -22,6 +22,7 @@ class SkillRecord:
 	approval_id: str
 	status: SkillState = SkillState.draft
 	activated_at: Optional[float] = None
+	is_static: bool = False
 
 
 class SkillRegistry:

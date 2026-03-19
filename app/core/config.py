@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3:8b"
     ollama_base_url: str = "http://192.168.0.118:11434"
     ollama_chat_model: str = "qwen3:8b"
+    ollama_agent_model: str = "llama3.1:8b"
+    ollama_coder_model: str = "qwen3:8b"
+    ollama_reviewer_model: str = "llama3.1:8b"
     ollama_fallback_models: str = "llama3.1:8b,qwen3:0.5b"
     ollama_embedding_model: str = "bge-m3:latest"
 

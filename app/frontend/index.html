@@ -3,668 +3,835 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AAF-AIOS Home</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <title>AAF-AIOS Chat</title>
   <style>
     :root {
-      --bg: #f2f2f2;
-      --sidebar: #ffffff;
-      --card: #ffffff;
-      --text: #111827;
-      --muted: #6b7280;
-      --line: #e5e7eb;
-      --primary: #7c3aed;
-      --name-start: #a855f7;
-      --name-end: #ec4899;
-      --shadow-soft: 0 8px 26px rgba(15, 23, 42, 0.08);
+      --bg-main: #212121;
+      --bg-sidebar: #171717;
+      --bg-input: #2f2f2f;
+      --border: #424242;
+      --text-primary: #ececec;
+      --text-secondary: #b4b4b4;
+      --accent: #ffffff;
+      --accent-text: #000000;
     }
 
-    * { box-sizing: border-box; }
-
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
     body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font-family: "DM Sans", sans-serif;
-      padding: 24px;
-    }
-
-    .app {
-      max-width: 1440px;
-      margin: 0 auto;
-      min-height: calc(100vh - 48px);
-      border-radius: 22px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-primary);
+      height: 100vh;
       display: flex;
-      gap: 20px;
-      align-items: stretch;
+      overflow: hidden;
     }
 
+    /* Sidebar */
     .sidebar {
-      width: 62px;
-      background: var(--sidebar);
-      border-radius: 18px;
-      box-shadow: var(--shadow-soft);
-      border: 1px solid var(--line);
+      width: 260px;
+      background-color: var(--bg-sidebar);
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
-      padding: 10px 8px;
+      padding: 12px;
+      transition: transform 0.3s ease;
+      flex-shrink: 0;
     }
-
-    .group {
+    
+    .new-chat-btn {
       display: flex;
-      flex-direction: column;
       align-items: center;
-      gap: 8px;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-primary);
+      background: transparent;
+      border: none;
+      transition: background 0.2s;
+      width: 100%;
+    }
+    
+    .new-chat-btn:hover { background-color: var(--bg-input); }
+    
+    .new-chat-btn svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
     }
 
-    .group.middle {
-      margin-top: 12px;
-      margin-bottom: 12px;
-      padding-top: 10px;
-      border-top: 1px dashed var(--line);
-      border-bottom: 1px dashed var(--line);
-      padding-bottom: 10px;
+    .history-list {
+      flex: 1;
+      overflow-y: auto;
+      margin-top: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
     }
+    
+    .history-item {
+      padding: 10px 12px;
+      font-size: 14px;
+      color: var(--text-primary);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      overflow: hidden;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .history-item:hover { background-color: var(--bg-input); }
 
-    .icon-btn {
+    .bottom-sidebar {
+      margin-top: auto;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .avatar-sm {
       width: 32px;
       height: 32px;
-      border: 0;
-      border-radius: 10px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      color: #6b7280;
-      background: transparent;
-      cursor: pointer;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #a855f7, #ec4899);
+      flex-shrink: 0;
     }
 
-    .icon-btn.active {
-      color: var(--primary);
-      background: #f5f3ff;
-    }
-
-    .icon-btn.logo {
-      background: #111827;
-      color: #fff;
-      border-radius: 10px;
-    }
-
-    .avatar {
-      width: 28px;
-      height: 28px;
-      border-radius: 999px;
-      background: linear-gradient(135deg, #f6ad55, #ed64a6);
-      border: 1px solid #f3f4f6;
-    }
-
+    /* Main Chat Area */
     .main {
       flex: 1;
-      border-radius: 22px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 12px 22px;
-    }
-
-    .center {
-      width: min(880px, 100%);
-    }
-
-    .title {
-      margin: 0;
-      font-size: clamp(2rem, 4.2vw, 3rem);
-      line-height: 1;
-      letter-spacing: -0.02em;
-      font-weight: 800;
-    }
-
-    .name {
-      background: linear-gradient(90deg, var(--name-start), var(--name-end));
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
-    }
-
-    .subtitle {
-      margin: 12px 0 0;
-      color: var(--muted);
-      font-size: 16px;
-    }
-
-    .cards {
-      margin-top: 20px;
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      min-height: 128px;
-      padding: 12px;
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
-      text-align: left;
-      cursor: pointer;
-      color: inherit;
+      position: relative;
+      height: 100%;
+      min-width: 0; /* allows flex children to shrink */
     }
-
-    .card p {
-      margin: 0;
-      font-size: 14px;
-      line-height: 1.4;
+    
+    .topbar {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
       font-weight: 500;
-      color: #111827;
-    }
-
-    .card .mini {
-      color: #9ca3af;
-      font-size: 16px;
-    }
-
-    .refresh {
-      margin-top: 10px;
-      border: 0;
-      background: transparent;
-      color: #6b7280;
       font-size: 14px;
-      cursor: pointer;
-      padding: 0;
+      color: var(--text-secondary);
+      border-bottom: 1px solid transparent;
     }
 
-    .composer {
-      margin-top: 12px;
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 12px;
-      box-shadow: var(--shadow-soft);
-    }
-
-    .composer-head {
+    .chat-container {
+      flex: 1;
+      overflow-y: auto;
       display: flex;
-      justify-content: flex-end;
-      margin-bottom: 6px;
-      gap: 8px;
+      flex-direction: column;
       align-items: center;
+      padding: 0 16px;
+      scroll-behavior: smooth;
     }
-
-    .debug-toggle {
-      color: var(--muted);
-      font-size: 12px;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .scope {
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: #fff;
-      padding: 6px 10px;
-      font-size: 12px;
-      color: #374151;
-    }
-
-    textarea {
+    
+    .chat-content {
       width: 100%;
-      border: 0;
-      resize: none;
-      outline: none;
-      font: inherit;
-      font-size: 15px;
-      color: #111827;
-      min-height: 84px;
-      padding: 0;
-      background: transparent;
+      max-width: 800px;
+      display: flex;
+      flex-direction: column;
+      padding-bottom: 20px;
     }
 
-    .composer-foot {
-      margin-top: 8px;
+    /* Welcome Screen */
+    .welcome-screen {
       display: flex;
-      justify-content: space-between;
+      flex-direction: column;
       align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
+      justify-content: center;
+      height: 100%;
+      width: 100%;
+      max-width: 800px;
+      margin: auto;
+      flex: 1;
     }
-
-    .left-actions {
+    .logo-large {
+      width: 72px;
+      height: 72px;
+      background: var(--accent);
+      color: var(--accent-text);
+      border-radius: 50%;
       display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      font-weight: bold;
+      margin-bottom: 24px;
+    }
+    .welcome-title {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 32px;
+    }
+    .suggestion-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
       gap: 12px;
-      color: #6b7280;
-      font-size: 14px;
-      align-items: center;
+      width: 100%;
     }
-
-    .left-actions button {
-      border: 0;
+    .suggestion-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      cursor: pointer;
+      transition: background 0.2s;
+      text-align: left;
       background: transparent;
-      color: inherit;
-      font: inherit;
-      cursor: pointer;
-      padding: 0;
+      color: var(--text-primary);
+    }
+    .suggestion-card:hover { background-color: var(--bg-input); }
+    .suggestion-card .title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .suggestion-card .subtitle {
+      font-size: 14px;
+      color: var(--text-secondary);
     }
 
-    .right-actions {
+    /* Chat Messages */
+    .message {
+      padding: 24px 0;
+      width: 100%;
       display: flex;
-      align-items: center;
-      gap: 10px;
+      gap: 16px;
     }
-
-    .counter {
-      font-size: 12px;
-      color: #6b7280;
-      min-width: 48px;
-      text-align: right;
+    .message.user { justify-content: flex-end; }
+    .message.assistant { justify-content: flex-start; }
+    
+    .message-bubble {
+      max-width: 80%;
+      font-size: 16px;
+      line-height: 1.6;
+      word-wrap: break-word;
+      white-space: pre-wrap;
     }
-
-    .send {
-      width: 30px;
-      height: 30px;
-      border-radius: 999px;
-      border: 0;
-      background: var(--primary);
-      color: #fff;
-      cursor: pointer;
-      display: inline-flex;
+    
+    .message.user .message-bubble {
+      background-color: var(--bg-input);
+      padding: 12px 20px;
+      border-radius: 24px;
+    }
+    
+    .message.assistant .message-bubble {
+      padding: 4px 0;
+      width: 100%;
+    }
+    
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: flex;
       align-items: center;
       justify-content: center;
       font-size: 14px;
-      line-height: 1;
+      font-weight: bold;
+    }
+    .avatar.assistant {
+      background: var(--accent);
+      color: var(--accent-text);
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.1);
     }
 
-    .result {
+    /* Artifacts / Reports */
+    .artifact-box {
       margin-top: 16px;
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
-      min-height: 100px;
-      box-shadow: var(--shadow-soft);
-    }
-
-    .result h3 {
-      margin: 0 0 10px;
-      font-size: 16px;
-      font-weight: 700;
-    }
-
-    .result .reply {
-      margin: 0;
-      color: #111827;
-      line-height: 1.5;
-      white-space: pre-wrap;
-    }
-
-    .badge {
-      margin-top: 10px;
-      display: inline-flex;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: 12px;
-      color: #6b7280;
-    }
-
-    .artifact {
-      margin-top: 12px;
-      border: 1px dashed var(--line);
-      border-radius: 10px;
-      padding: 10px;
-      background: #fff;
-    }
-
-    .artifact pre {
-      margin: 0;
-      max-height: 260px;
-      overflow: auto;
-      white-space: pre-wrap;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      color: #1f2937;
-    }
-
-    .artifact img,
-    .artifact iframe {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      background: var(--bg-sidebar);
+      font-size: 14px;
       width: 100%;
-      border: 1px solid var(--line);
+      overflow-x: auto;
+    }
+    .artifact-box strong {
+      display: block;
+      margin-bottom: 8px;
+    }
+    .artifact-box pre {
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    
+    .artifact-box img,
+    .artifact-box iframe {
+      width: 100%;
+      border: 1px solid var(--border);
       border-radius: 8px;
       background: #fff;
-    }
-
-    .artifact img {
-      max-height: 340px;
-      object-fit: contain;
-    }
-
-    .artifact iframe {
-      height: 340px;
       margin-top: 8px;
     }
-
-    .artifact a {
-      color: var(--primary);
+    .artifact-box img { max-height: 340px; object-fit: contain; }
+    .artifact-box iframe { height: 340px; }
+    
+    .artifact-box a {
+      color: #60a5fa;
       text-decoration: none;
-      font-weight: 600;
       display: inline-block;
       margin-top: 8px;
     }
+    .artifact-box a:hover { text-decoration: underline; }
 
-    .artifact a:hover {
-      text-decoration: underline;
+    /* Input Area */
+    .input-area {
+      position: relative;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 16px 24px;
+      background: linear-gradient(180deg, transparent, var(--bg-main) 20%);
+    }
+    .input-container {
+      width: 100%;
+      max-width: 800px;
+      background-color: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 26px;
+      display: flex;
+      align-items: flex-end;
+      padding: 8px 12px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.1);
+    }
+    .input-container textarea {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 16px;
+      line-height: 24px;
+      max-height: 200px;
+      resize: none;
+      padding: 8px;
+      margin: 0 8px;
+    }
+    .action-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: none;
+      background: transparent;
+      color: var(--text-primary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+      margin-bottom: 4px;
+    }
+    .action-btn:hover { background-color: var(--border); }
+    .action-btn svg { width: 18px; height: 18px; fill: currentColor; }
+    
+    .send-btn {
+      background: var(--accent);
+      color: var(--accent-text);
+      margin-left: auto;
+    }
+    .send-btn:hover {
+      opacity: 0.9;
+      background: var(--accent);
+    }
+    .send-btn:disabled {
+      background: var(--border);
+      color: var(--text-secondary);
+      cursor: not-allowed;
+    }
+    .disclaimer {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 12px;
+      text-align: center;
     }
 
-    .hidden {
-      display: none;
+    .hidden { display: none !important; }
+
+    /* Typing indicator */
+    .typing-indicator {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      padding: 8px 0;
+    }
+    .typing-dot {
+      width: 6px;
+      height: 6px;
+      background: var(--text-secondary);
+      border-radius: 50%;
+      animation: typing 1.4s infinite ease-in-out both;
+    }
+    .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+    .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+    @keyframes typing {
+      0%, 80%, 100% { transform: scale(0); }
+      40% { transform: scale(1); }
     }
 
-    @media (max-width: 1023px) {
-      body {
-        padding: 10px;
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .suggestion-grid { grid-template-columns: 1fr; }
+    }
+    
+    /* Utility */
+    .controls-row {
+      display: flex;
+      gap: 12px;
+      padding: 0 16px;
+      margin-bottom: 8px;
+      width: 100%;
+      max-width: 800px;
+    }
+    .toggle-debug {
+      font-size: 12px;
+      color: var(--text-secondary);
+      .markdown-content img {
+        max-width: 100%;
+        border-radius: 8px;
+        margin: 8px 0;
       }
-
-      .app {
-        border-radius: 12px;
-        min-height: auto;
+      .markdown-content h1, .markdown-content h2 {
+        margin: 12px 0 8px 0;
+        color: #fff;
       }
-
-      .sidebar {
-        display: none;
+      .markdown-content p {
+        margin-bottom: 8px;
+        line-height: 1.5;
       }
-
-      .main {
-        padding: 10px;
-      }
-
-      .cards {
-        grid-template-columns: 1fr;
+      .artifact-box img {
+        width: 100%;
+        border-radius: 8px;
+        margin-top: 8px;
+        border: 1px solid #444;
       }
     }
   </style>
 </head>
 <body>
-  <div class="app">
-    <aside class="sidebar">
-      <div class="group">
-        <button class="icon-btn logo" aria-label="logo">✦</button>
-        <button class="icon-btn" aria-label="new chat">＋</button>
-      </div>
-
-      <div class="group middle">
-        <button class="icon-btn" aria-label="search">⌕</button>
-        <button class="icon-btn active" aria-label="home">⌂</button>
-        <button class="icon-btn" aria-label="folder">⊡</button>
-        <button class="icon-btn" aria-label="history">◔</button>
-      </div>
-
-      <div class="group">
-        <button class="icon-btn" aria-label="settings">⚙</button>
-        <div class="avatar" aria-label="avatar"></div>
-      </div>
-    </aside>
-
-    <main class="main">
-      <section class="center">
-        <h1 class="title">Hi there, <span class="name">John</span></h1>
-        <h2 class="title" style="margin-top: 2px;">What would like to know?</h2>
-        <p class="subtitle">Use one of the most common prompts below or use your own to begin</p>
-
-        <div class="cards" id="cards">
-          <button class="card" data-prompt="Write a to-do list for a personal project or task">
-            <p>Write a to-do list for a personal project or task</p>
-            <span class="mini">◌</span>
-          </button>
-          <button class="card" data-prompt="Generate an email reply to a job offer">
-            <p>Generate an email reply to a job offer</p>
-            <span class="mini">✉</span>
-          </button>
-          <button class="card" data-prompt="Summarize this article or text for me in one paragraph">
-            <p>Summarize this article or text for me in one paragraph</p>
-            <span class="mini">◰</span>
-          </button>
-          <button class="card" data-prompt="How does AI work in a technical capacity">
-            <p>How does AI work in a technical capacity</p>
-            <span class="mini">☷</span>
-          </button>
+  
+  <aside class="sidebar">
+    <button class="new-chat-btn" id="newChatBtn">
+      <span style="display: flex; align-items: center; gap: 8px;">
+        <div class="avatar-sm" style="width: 24px; height: 24px; background: transparent; border: 1px solid var(--border); display: flex; justify-content: center; align-items: center; border-radius: 50%;">
+          <svg viewBox="0 0 24 24" style="width: 14px; height: 14px;"><path d="M12 2.5L13.9 9.1L20.5 11L13.9 12.9L12 19.5L10.1 12.9L3.5 11L10.1 9.1L12 2.5Z" fill="currentColor"/></svg>
         </div>
+        New chat
+      </span>
+      <svg viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    
+    <div class="history-list" id="historyList">
+      <!-- History items will be populated here -->
+      <div class="history-item">Recent conversation...</div>
+    </div>
+    
+    <div class="bottom-sidebar">
+      <div class="avatar-sm"></div>
+      <span>User</span>
+    </div>
+  </aside>
 
-        <button class="refresh" id="refreshPrompts">⟳ Refresh Prompts</button>
+  <main class="main">
+    <div class="topbar">
+      <span>ChatGPT 3.5</span>
+    </div>
 
-        <div class="composer">
-          <div class="composer-head">
-            <label class="debug-toggle"><input type="checkbox" id="debugMode" /> Debug</label>
-            <button class="scope">🌐 All Web ▾</button>
-          </div>
-
-          <textarea id="prompt" maxlength="1000" placeholder="Ask whatever you want...."></textarea>
-
-          <div class="composer-foot">
-            <div class="left-actions">
-              <label><button id="fileBtn" type="button">⊕ Add Attachment</button></label>
-              <input id="uploadFile" type="file" class="hidden" accept=".txt,.csv,.json" />
-              <button id="useImageBtn" type="button">🖼 Use Image</button>
-            </div>
-            <div class="right-actions">
-              <span class="counter" id="counter">0/1000</span>
-              <button class="send" id="sendBtn" aria-label="send">➜</button>
-            </div>
+    <div class="chat-container" id="chatContainer">
+      <div class="chat-content" id="chatContent">
+        
+        <div class="welcome-screen" id="welcomeScreen">
+          <div class="logo-large">AI</div>
+          <h1 class="welcome-title">How can I help you today?</h1>
+          
+          <div class="suggestion-grid">
+            <button class="suggestion-card" data-prompt="Write a to-do list for a personal project or task">
+              <div class="title">Plan a project</div>
+              <div class="subtitle">Write a to-do list for a task</div>
+            </button>
+            <button class="suggestion-card" data-prompt="Generate an email reply to a job offer">
+              <div class="title">Write an email</div>
+              <div class="subtitle">Reply to a job offer</div>
+            </button>
+            <button class="suggestion-card" data-prompt="Summarize this article or text for me in one paragraph">
+              <div class="title">Summarize text</div>
+              <div class="subtitle">Extract key points</div>
+            </button>
+            <button class="suggestion-card" data-prompt="How does AI work in a technical capacity">
+              <div class="title">Explain concepts</div>
+              <div class="subtitle">How AI works technically</div>
+            </button>
           </div>
         </div>
+        
+        <!-- Messages will be appended here -->
+      </div>
+    </div>
 
-        <section class="result" id="resultBox">
-          <h3>Kết quả</h3>
-          <p class="reply" id="replyText">Chưa có dữ liệu. Hãy nhập yêu cầu để bắt đầu.</p>
-          <div class="badge" id="statusBadge">Idle</div>
+    <div class="input-area">
+      <div class="controls-row">
+        <label class="toggle-debug">
+          <input type="checkbox" id="debugMode" /> Debug Mode
+        </label>
+      </div>
+      
+      <div class="input-container">
+        <!-- Attachment button -->
+        <button class="action-btn" id="fileBtn" aria-label="Attach file">
+          <svg viewBox="0 0 24 24"><path d="M21.586 10.461l-10.05 10.075c-1.95 1.959-5.122 1.959-7.071 0-1.95-1.96-1.95-5.122 0-7.081l10.606-10.606c1.17-1.17 3.073-1.17 4.243 0 1.169 1.17 1.169 3.073 0 4.242l-8.507 8.51c-.39.39-1.024.39-1.414 0-.39-.39-.39-1.023 0-1.414l7.07-7.071-1.414-1.414-7.071 7.07c-1.17 1.17-1.17 3.073 0 4.243 1.17 1.17 3.073 1.17 4.243 0l8.506-8.507c1.95-1.959 1.95-5.122 0-7.08-1.951-1.96-5.122-1.96-7.071 0l-10.608 10.605c-2.73 2.73-2.73 7.159 0 9.889 2.73 2.73 7.158 2.73 9.888 0l10.05-10.075-1.414-1.414z" fill="currentColor"/></svg>
+        </button>
+        <input id="uploadFile" type="file" class="hidden" accept=".txt,.csv,.json" />
+        
+        <textarea id="prompt" rows="1" placeholder="Message AAF-AIOS..."></textarea>
+        
+        <button class="action-btn send-btn" id="sendBtn" disabled aria-label="Send message">
+          <svg viewBox="0 0 24 24"><path d="M12 4l-8 8h6v8h4v-8h6z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div class="disclaimer">
+        AAF-AIOS can make mistakes. Consider verifying important information.
+      </div>
+    </div>
+  </main>
 
-          <div class="artifact hidden" id="reportMarkdownBox">
-            <strong>Báo cáo markdown</strong>
-            <pre id="reportMarkdown"></pre>
-          </div>
-
-          <div class="artifact hidden" id="reportFileBox">
-            <strong>Báo cáo trực tiếp</strong>
-            <div id="reportLinks"></div>
-            <iframe id="reportFrame" loading="lazy"></iframe>
-          </div>
-
-          <div class="artifact hidden" id="imageBox">
-            <strong>Hình ảnh trả về</strong>
-            <img id="resultImage" alt="Agent output image" />
-          </div>
-        </section>
-      </section>
-    </main>
-  </div>
-
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
 
-    const promptEl = $("prompt");
-    const counterEl = $("counter");
-    const statusBadge = $("statusBadge");
-    const replyText = $("replyText");
+    const promptEl = $('prompt');
+    const sendBtn = $('sendBtn');
+    const chatContent = $('chatContent');
+    const chatContainer = $('chatContainer');
+    const welcomeScreen = $('welcomeScreen');
+    const fileBtn = $('fileBtn');
+    const uploadFile = $('uploadFile');
+    const newChatBtn = $('newChatBtn');
+    const debugMode = $('debugMode');
 
-    const reportMarkdownBox = $("reportMarkdownBox");
-    const reportMarkdown = $("reportMarkdown");
+    let currentRequest = null;
 
-    const reportFileBox = $("reportFileBox");
-    const reportLinks = $("reportLinks");
-    const reportFrame = $("reportFrame");
-
-    const imageBox = $("imageBox");
-    const resultImage = $("resultImage");
-
-    function setStatus(text) {
-      statusBadge.textContent = text;
-    }
-
-    function updateCounter() {
-      counterEl.textContent = `${promptEl.value.length}/1000`;
-    }
-
-    function hideArtifacts() {
-      reportMarkdownBox.classList.add("hidden");
-      reportFileBox.classList.add("hidden");
-      imageBox.classList.add("hidden");
-      reportMarkdown.textContent = "";
-      reportLinks.innerHTML = "";
-      reportFrame.removeAttribute("src");
-      resultImage.removeAttribute("src");
-    }
-
-    async function callJson(url, init) {
-      const response = await fetch(url, init);
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${JSON.stringify(data)}`);
+    // Auto-resize textarea
+    promptEl.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = (this.scrollHeight) + 'px';
+      
+      if (this.value.trim().length > 0) {
+        sendBtn.disabled = false;
+        sendBtn.style.opacity = '1';
+      } else {
+        sendBtn.disabled = true;
+        sendBtn.style.opacity = '';
       }
-      return data;
-    }
+    });
 
-    function renderArtifacts(artifacts) {
-      hideArtifacts();
-      if (!artifacts) return;
-
-      if (artifacts.report_markdown) {
-        reportMarkdownBox.classList.remove("hidden");
-        reportMarkdown.textContent = artifacts.report_markdown;
-      }
-
-      if (artifacts.report_files) {
-        reportFileBox.classList.remove("hidden");
-        const htmlUrl = artifacts.report_files.html_url;
-        const pdfUrl = artifacts.report_files.pdf_url;
-
-        if (htmlUrl) {
-          const htmlLink = document.createElement("a");
-          htmlLink.href = `${location.origin}${htmlUrl}`;
-          htmlLink.target = "_blank";
-          htmlLink.rel = "noopener noreferrer";
-          htmlLink.textContent = "Mở báo cáo HTML";
-          reportLinks.appendChild(htmlLink);
-          reportFrame.src = `${location.origin}${htmlUrl}`;
-        }
-
-        if (pdfUrl) {
-          const br = document.createElement("br");
-          const pdfLink = document.createElement("a");
-          pdfLink.href = `${location.origin}${pdfUrl}`;
-          pdfLink.target = "_blank";
-          pdfLink.rel = "noopener noreferrer";
-          pdfLink.textContent = "Mở báo cáo PDF";
-          reportLinks.appendChild(br);
-          reportLinks.appendChild(pdfLink);
+    promptEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (!sendBtn.disabled) {
+          handleSend();
         }
       }
+    });
 
-      if (artifacts.image_base64) {
-        imageBox.classList.remove("hidden");
-        const isSvg = artifacts.image_base64.trim().startsWith("PHN2Zy");
-        const mime = isSvg ? "image/svg+xml" : "image/png";
-        resultImage.src = `data:${mime};base64,${artifacts.image_base64}`;
+    fileBtn.addEventListener('click', () => {
+      uploadFile.click();
+    });
+
+    uploadFile.addEventListener('change', () => {
+      if (uploadFile.files.length > 0) {
+        const file = uploadFile.files[0];
+        promptEl.value += `[Đính kèm file: ${file.name}] `;
+        promptEl.dispatchEvent(new Event('input'));
+        promptEl.focus();
       }
+    });
+
+    newChatBtn.addEventListener('click', () => {
+      // Clear chat content except welcome screen
+      const messages = chatContent.querySelectorAll('.message');
+      messages.forEach(m => m.remove());
+      welcomeScreen.classList.remove('hidden');
+      promptEl.value = '';
+      promptEl.style.height = 'auto';
+      sendBtn.disabled = true;
+      uploadFile.value = '';
+      
+      // CRITICAL: Clear memory so previous chat context isn't sent!
+      conversationHistory = [];
+      localStorage.removeItem('chat_history');
+    });
+
+    document.querySelectorAll('.suggestion-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const text = card.getAttribute('data-prompt');
+        promptEl.value = text;
+        promptEl.dispatchEvent(new Event('input'));
+        handleSend();
+      });
+    });
+
+    function scrollToBottom() {
+      chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 
-    async function sendMessage(rawText) {
-      const message = (rawText || promptEl.value || "").trim();
-      if (!message) {
-        setStatus("Vui lòng nhập yêu cầu");
-        return;
+    function addMessage(role, content, artifacts = null) {
+      welcomeScreen.classList.add('hidden');
+      
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `message ${role}`;
+      
+      let innerHTML = '';
+      
+      if (role === 'assistant') {
+        const htmlContent = (typeof marked !== 'undefined') ? marked.parse(content || '') : escapeHTML(content);
+        innerHTML += `
+          <div class="avatar assistant">AI</div>
+          <div class="message-bubble">
+            <div class="markdown-content">${htmlContent}</div>
+            ${renderArtifactsHTML(artifacts)}
+          </div>
+        `;
+      } else {
+        innerHTML += `
+          <div class="message-bubble">${escapeHTML(content)}</div>
+        `;
+      }
+      
+      msgDiv.innerHTML = innerHTML;
+      chatContent.appendChild(msgDiv);
+      scrollToBottom();
+      return msgDiv;
+    }
+
+    function addTypingIndicator() {
+      welcomeScreen.classList.add('hidden');
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `message assistant id-typing`;
+      msgDiv.innerHTML = `
+        <div class="avatar assistant">AI</div>
+        <div class="message-bubble">
+          <div class="typing-indicator">
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+          </div>
+        </div>
+      `;
+      chatContent.appendChild(msgDiv);
+      scrollToBottom();
+      return msgDiv;
+    }
+
+    function removeTypingIndicator() {
+      const el = chatContent.querySelector('.id-typing');
+      if (el) el.remove();
+    }
+
+    function escapeHTML(str) {
+      if (!str) return '';
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function renderArtifactsHTML(artifacts) {
+      if (!artifacts) return '';
+      let html = '';
+
+      if (artifacts.debug) {
+        let dbg = artifacts.debug;
+        html += `
+          <div class="artifact-box" style="background-color: #1e1e1e; font-family: monospace; border-left: 3px solid #ffab00;">
+            <strong style="color: #ffab00; font-size: 13px;">⚙️ System Diagnostics (Debug Mode)</strong>
+            <details style="margin-top: 8px; margin-bottom: 6px;">
+              <summary style="cursor: pointer; color: #a4c2f4; font-size: 13px;">1. Memory & Facts (${dbg.extracted_facts ? dbg.extracted_facts.length : 0} learned)</summary>
+              <pre style="margin-top: 6px; padding: 8px; background: #000; border-radius: 4px;">${JSON.stringify(dbg.extracted_facts, null, 2)}</pre>
+            </details>
+            <details style="margin-bottom: 6px;">
+              <summary style="cursor: pointer; color: #a4c2f4; font-size: 13px;">2. Intent Parser Output</summary>
+              <pre style="margin-top: 6px; padding: 8px; background: #000; border-radius: 4px;">${JSON.stringify(dbg.intent_raw, null, 2)}</pre>
+            </details>
+            <details style="margin-bottom: 6px;">
+              <summary style="cursor: pointer; color: #a4c2f4; font-size: 13px;">3. Planner Output (Skills to execute)</summary>
+              <pre style="margin-top: 6px; padding: 8px; background: #000; border-radius: 4px;">${JSON.stringify(dbg.plan_raw, null, 2)}</pre>
+            </details>
+            <details>
+              <summary style="cursor: pointer; color: #a4c2f4; font-size: 13px;">4. LLM Attempts & Telemetry</summary>
+              <pre style="margin-top: 6px; padding: 8px; background: #000; border-radius: 4px;">${JSON.stringify(dbg.planner_used, null, 2)}</pre>
+            </details>
+          </div>
+        `;
+      }
+      
+      // The backend nests tool outputs under artifacts.skill_output, but might extract some to root as well.
+      const skillOut = Object.assign({}, artifacts, artifacts.skill_output || {});
+
+      // Handle image URLs (either single string or array)
+      let urls = [];
+      if (skillOut.image_urls && Array.isArray(skillOut.image_urls)) {
+          urls = skillOut.image_urls;
+      } else if (skillOut.image_url) {
+          urls = [skillOut.image_url];
       }
 
-      setStatus("Đang xử lý...");
-      replyText.textContent = "Hệ thống đang thực thi yêu cầu của bạn...";
+      if (urls.length > 0) {
+        html += `<div class="artifact-box"><strong>Images from Web</strong><div style="display:flex;flex-wrap:wrap;gap:8px;">`;
+        urls.forEach(url => {
+           html += `<img src="${url}" style="width:calc(50% - 4px);height:150px;object-fit:cover;border-radius:8px;cursor:pointer" onclick="window.open('${url}')" onerror="this.style.display='none'" />`;
+        });
+        html += `</div></div>`;
+      }
+
+      if (skillOut.report_markdown) {
+        html += `
+          <div class="artifact-box">
+            <strong><svg viewBox="0 0 24 24" width="16" height="16" style="display:inline;vertical-align:bottom;margin-right:4px;"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg> Report</strong>
+            <div class="markdown-content">${marked.parse(skillOut.report_markdown)}</div>
+          </div>
+        `;
+      }
+
+      if (skillOut.report_files) {
+        html += `<div class="artifact-box"><strong>Attached Files</strong>`;
+        if (skillOut.report_files.html_url) {
+          html += `<a href="${skillOut.report_files.html_url}" target="_blank">View HTML Report</a><br/>`;
+          html += `<iframe src="${skillOut.report_files.html_url}" loading="lazy"></iframe>`;
+        }
+        if (skillOut.report_files.pdf_url) {
+          html += `<a href="${skillOut.report_files.pdf_url}" target="_blank">Download PDF Report</a>`;
+        }
+        html += `</div>`;
+      }
+
+      if (skillOut.image_base64) {
+        // Handle array of base64 strings or single string
+        const b64Array = Array.isArray(skillOut.image_base64) ? skillOut.image_base64 : [skillOut.image_base64];
+        b64Array.forEach(b64 => {
+            const isSvg = b64.trim().startsWith("PHN2Zy") || b64.trim().startsWith("PD94bWw");
+            const mime = isSvg ? "image/svg+xml" : "image/png";
+            html += `
+              <div class="artifact-box">
+                <strong>Generated Artifact</strong>
+                <img src="data:${mime};base64,${b64}" alt="AI Gen" />
+              </div>
+            `;
+        });
+      }
+
+      return html;
+    }
+
+
+    // In-memory + persistent conversation history
+    let conversationHistory = JSON.parse(localStorage.getItem('chat_history') || '[]');
+
+    function saveHistory() {
+      localStorage.setItem('chat_history', JSON.stringify(conversationHistory.slice(-50)));
+    }
+
+    // Load history into UI on startup
+    window.addEventListener('DOMContentLoaded', () => {
+      conversationHistory.forEach(msg => {
+        // We don't have artifacts in history easily for UI re-render here without more logic, 
+        // but the 'context' is preserved for the next API call.
+        // For now, just re-add text to UI.
+        addMessage(msg.role, msg.content, null, true); // true = silent/no-animation
+      });
+    });
+
+    async function handleSend() {
+      const text = promptEl.value.trim();
+      const file = uploadFile.files[0];
+      if (!text && !file) return;
+
+      // Add user message to UI
+      addMessage('user', text || `[Uploaded file: ${file.name}]`);
+      
+      // Track in history
+      conversationHistory.push({ role: 'user', content: text || `Uploaded: ${file?.name}` });
+      saveHistory();
+
+      // Cleanup input
+      promptEl.value = '';
+      promptEl.style.height = 'auto';
+      sendBtn.disabled = true;
+      
+      // Show typing
+      addTypingIndicator();
+
+      const debug = debugMode.checked;
+      let data = {};
 
       try {
-        const file = $("uploadFile").files[0];
-        const debug = $("debugMode").checked;
-        let data;
-
         if (file) {
           const form = new FormData();
-          form.append("message", message);
+          form.append("message", text);
           form.append("file", file);
+          form.append("conversation_history", JSON.stringify(conversationHistory.slice(-20)));
           form.append("force_new", "false");
           form.append("debug", String(debug));
-          data = await callJson("/api/v1/agents/chat/upload", {
+          form.append("user_email", "tuanm7530@gmail.com");
+          
+          const res = await fetch("/api/v1/agents/chat/upload", {
             method: "POST",
             body: form,
           });
+          data = await res.json();
+          if (!res.ok) throw new Error(data.message || 'API Error');
         } else {
-          data = await callJson("/api/v1/agents/chat", {
+          const res = await fetch("/api/v1/agents/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              message,
+              message: text,
               force_new: false,
-              debug,
+              debug: debug,
+              user_email: "tuanm7530@gmail.com",
+              conversation_history: conversationHistory.slice(-20), // last 20 turns
             }),
           });
+          data = await res.json();
+          if (!res.ok) throw new Error(data.message || 'API Error');
         }
 
-        setStatus("Hoàn tất");
-        replyText.textContent = data.reply || "Đã xử lý xong.";
-        renderArtifacts(data.artifacts || null);
-      } catch (error) {
-        setStatus("Thất bại");
-        replyText.textContent = `Lỗi: ${String(error)}`;
-        hideArtifacts();
+
+        removeTypingIndicator();
+        const replyText = data.reply || "Done.";
+        addMessage('assistant', replyText, data.artifacts);
+
+        // Store assistant response in history (including report for context)
+        conversationHistory.push({
+          role: 'assistant',
+          content: replyText,
+          report_markdown: data.artifacts?.report_markdown || null,
+          image_base64: data.artifacts?.image_base64 || null,
+        });
+        saveHistory();
+
+      } catch (err) {
+        removeTypingIndicator();
+        addMessage('assistant', `⚠️ Lỗi: ${err.message}`);
       }
+      
+      // Reset file input
+      uploadFile.value = '';
     }
-
-    promptEl.addEventListener("input", updateCounter);
-    updateCounter();
-
-    $("sendBtn").addEventListener("click", () => sendMessage());
-
-    promptEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-        sendMessage();
-      }
-    });
-
-    $("fileBtn").addEventListener("click", () => {
-      $("uploadFile").click();
-    });
-
-    $("useImageBtn").addEventListener("click", () => {
-      promptEl.value = `${promptEl.value}\nTạo hình ảnh tóm tắt kết quả.`.trim();
-      updateCounter();
-      promptEl.focus();
-    });
-
-    document.querySelectorAll("#cards .card").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const prompt = btn.getAttribute("data-prompt") || "";
-        promptEl.value = prompt;
-        updateCounter();
-        sendMessage(prompt);
-      });
-    });
-
-    $("refreshPrompts").addEventListener("click", () => {
-      const prompts = [
-        "Báo cáo giá vàng trong một tuần gần đây",
-        "Tóm tắt biến động CPI Mỹ tháng gần nhất",
-        "So sánh lãi suất điều hành của FED và BOJ",
-        "Phân tích xu hướng tỷ giá USD/VND 30 ngày",
-      ];
-      const cards = Array.from(document.querySelectorAll("#cards .card"));
-      cards.forEach((card, idx) => {
-        const p = prompts[(idx + Math.floor(Math.random() * prompts.length)) % prompts.length];
-        card.setAttribute("data-prompt", p);
-        const textEl = card.querySelector("p");
-        if (textEl) textEl.textContent = p;
-      });
-    });
   </script>
 </body>
 </html>

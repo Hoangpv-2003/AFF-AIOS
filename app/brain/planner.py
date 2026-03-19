@@ -53,11 +53,12 @@ class PlannerAgent(BaseAgent):
         if self.llm_client is None or not hasattr(self.llm_client, "generate"):
             return self.create_plan(task_input), False, ""
 
-        messages = build_planner_messages(task_input=task_input)
+        messages = build_planner_messages(
+            task_input=task_input,
+            memory_context=memory_context,
+        )
         system_prompt = messages[0]["content"]
         llm_prompt = messages[1]["content"]
-        if memory_context:
-            llm_prompt += f"Relevant memory:\n{memory_context}\n\n"
 
         try:
             response = str(
@@ -71,6 +72,8 @@ class PlannerAgent(BaseAgent):
 
         candidate_steps: List[str] = []
         confidence = 0.85
+        arch_decisions = None
+        planner_notes = ""
         try:
             parsed = json.loads(response)
             parsed_steps = parsed.get("steps") or []
@@ -84,6 +87,8 @@ class PlannerAgent(BaseAgent):
                 elif isinstance(item, str) and item.strip():
                     candidate_steps.append(item.strip())
             confidence = float(parsed.get("confidence", 0.85))
+            arch_decisions = parsed.get("architectural_decisions")
+            planner_notes = str(parsed.get("planner_notes") or "").strip()
         except Exception:
             candidate_steps = [
                 line.strip("- *\t ")
@@ -101,6 +106,8 @@ class PlannerAgent(BaseAgent):
             objective=task_input.strip(),
             steps=steps,
             confidence=confidence,
+            architectural_decisions=arch_decisions,
+            planner_notes=planner_notes,
         )
         return plan, bool(candidate_steps), response
 
@@ -130,6 +137,13 @@ class PlannerAgent(BaseAgent):
             )
             if not allowed:
                 return AgentResult(success=False, reason_code=reason)
+
+        # Incorporate conversation history if available
+        if context.history_summary:
+            prompt = (
+                f"## Lich su cuoc chat\n{context.history_summary}\n\n"
+                f"## Yeu cau hien tai\n{prompt}"
+            )
 
         plan, llm_used, llm_output = self._create_plan_with_llm(
             prompt,

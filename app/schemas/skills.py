@@ -30,6 +30,7 @@ class SkillManifest(BaseModel):
     source_task_id: Optional[str] = None
     approval_id: Optional[str] = None
     activated_at: Optional[float] = None
+    is_static: bool = False
 
 
 class SkillManifestDraft(SkillManifest):
@@ -43,3 +44,4 @@ class SkillRegisterRequest(BaseModel):
     source_task_id: str
     approval_id: str
     status: SkillState = SkillState.draft
+    is_static: bool = False

@@ -18,6 +18,8 @@ class Plan(BaseModel):
     objective: str
     steps: list[str] = Field(default_factory=list)
     confidence: float = 0.0
+    architectural_decisions: Optional[dict] = Field(default=None)
+    planner_notes: Optional[str] = Field(default=None)
 
 
 class CoderArtifact(BaseModel):

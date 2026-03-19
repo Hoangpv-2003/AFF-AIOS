@@ -33,6 +33,7 @@ class OllamaLLMClient:
         prompt: str,
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
+        response_format: Optional[str] = None,
     ) -> str:
         final_prompt = (
             prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
@@ -41,13 +42,17 @@ class OllamaLLMClient:
         attempts: List[Dict[str, object]] = []
         for candidate in self._models_in_order(override_model=model):
             try:
+                payload = {
+                    "model": candidate,
+                    "prompt": final_prompt,
+                    "stream": False,
+                }
+                if response_format:
+                    payload["format"] = response_format
+
                 response = httpx.post(
                     f"{self.base_url.rstrip('/')}/api/generate",
-                    json={
-                        "model": candidate,
-                        "prompt": final_prompt,
-                        "stream": False,
-                    },
+                    json=payload,
                     timeout=self.timeout_seconds,
                 )
                 response.raise_for_status()

@@ -13,8 +13,13 @@ from app.schemas.agents import CoderArtifactDraft, ReviewStatus, ReviewVerdictDr
 class ReviewerAgent(BaseAgent):
 	name = "reviewer"
 
-	def __init__(self, sandbox_runner: LocalSandboxRunner | None = None) -> None:
+	def __init__(
+		self, 
+		sandbox_runner: LocalSandboxRunner | None = None,
+		llm_client: Any | None = None,
+	) -> None:
 		self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
+		self.llm_client = llm_client
 
 	def review_artifacts(self, artifacts: CoderArtifactDraft) -> ReviewVerdictDraft:
 		if not artifacts.files:

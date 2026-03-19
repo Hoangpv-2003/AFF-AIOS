@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import time
 import uuid
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load all environment variables from .env if present
+load_dotenv()
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -17,6 +22,7 @@ from app.infrastructure.observability.tracing import (
     configure_tracer,
     get_tracer,
 )
+from app.services.job_scheduler import JobScheduler
 
 
 def create_app() -> FastAPI:
@@ -24,9 +30,13 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.started = True
         app.state.start_time = time.time()
+        # Khởi động Job Scheduler và khôi phục jobs từ MongoDB
+        scheduler = JobScheduler.get_instance()
+        scheduler.reload_from_db()
         try:
             yield
         finally:
+            scheduler.stop_all()
             app.state.started = False
 
     app = FastAPI(title="AAF-AIOS", version="0.1.0", lifespan=lifespan)
@@ -50,6 +60,8 @@ def create_app() -> FastAPI:
         try:
             response = await call_next(request)
         except Exception as exc:  # pragma: no cover
+            import traceback
+            traceback.print_exc()
             tracer.add_event(
                 trace_id=trace_id,
                 span_id=root_span_id,

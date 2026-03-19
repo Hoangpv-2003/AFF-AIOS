@@ -12,16 +12,20 @@ from app.brain.planner import PlannerAgent
 from app.core.config import Settings, get_settings
 from app.core.security import AuthContext
 from app.infrastructure.database.chroma_store import ChromaMemoryStore
+from app.infrastructure.database.qdrant_store import QdrantMemoryStore
+from app.infrastructure.database.mongodb_store import MongoDBStore
 from app.infrastructure.budget.enforcer import BudgetEnforcer
 from app.infrastructure.external_apis.ollama_client import (
     OllamaEmbeddingClient,
     OllamaLLMClient,
 )
 from app.infrastructure.queue.redis_rq_client import RedisRQQueueClient
+from app.infrastructure.queue.redis_rq_real_client import RedisRQRealClient
 
 
-_VECTOR_STORES: Dict[str, ChromaMemoryStore] = {}
+_VECTOR_STORES: Dict[str, Any] = {}
 _RAG_SERVICES: Dict[str, RAGService] = {}
+_MONGODB_STORES: Dict[str, MongoDBStore] = {}
 
 
 def _parse_fallback_models(raw: str) -> List[str]:
@@ -34,14 +38,33 @@ def get_settings_dep() -> Settings:
 
 def get_llm_client(
     settings: Settings = Depends(get_settings_dep),
+    model_name: Optional[str] = None,
 ) -> OllamaLLMClient:
     return OllamaLLMClient(
         base_url=settings.ollama_base_url,
-        primary_model=settings.ollama_chat_model,
+        primary_model=model_name or settings.ollama_chat_model,
         fallback_models=_parse_fallback_models(
             settings.ollama_fallback_models
         ),
     )
+
+
+def get_agent_llm_client(
+    settings: Settings = Depends(get_settings_dep),
+) -> OllamaLLMClient:
+    return get_llm_client(settings, model_name=settings.ollama_agent_model)
+
+
+def get_coder_llm_client(
+    settings: Settings = Depends(get_settings_dep),
+) -> OllamaLLMClient:
+    return get_llm_client(settings, model_name=settings.ollama_coder_model)
+
+
+def get_reviewer_llm_client(
+    settings: Settings = Depends(get_settings_dep),
+) -> OllamaLLMClient:
+    return get_llm_client(settings, model_name=settings.ollama_reviewer_model)
 
 
 def get_embedding_client(
@@ -55,12 +78,19 @@ def get_embedding_client(
 
 def get_vector_store(
     settings: Settings = Depends(get_settings_dep),
-) -> ChromaMemoryStore:
+) -> Any:
     key = f"{settings.environment}:{settings.vector_provider}"
     if key not in _VECTOR_STORES:
-        _VECTOR_STORES[key] = ChromaMemoryStore(
-            collection_name=f"aaf_{settings.environment}"
-        )
+        if not settings.demo_mode and settings.qdrant_url:
+            _VECTOR_STORES[key] = QdrantMemoryStore(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key,
+                collection_name=f"aaf_{settings.environment}",
+            )
+        else:
+            _VECTOR_STORES[key] = ChromaMemoryStore(
+                collection_name=f"aaf_{settings.environment}"
+            )
     return _VECTOR_STORES[key]
 
 
@@ -80,8 +110,32 @@ def get_rag_service(
 
 def get_queue_client(
     settings: Settings = Depends(get_settings_dep),
-) -> RedisRQQueueClient:
+) -> Any:
+    if not settings.demo_mode and settings.redis_url:
+        return RedisRQRealClient(redis_url=settings.redis_url)
     return RedisRQQueueClient()
+
+
+def get_mongodb_store(
+    settings: Settings = Depends(get_settings_dep),
+) -> Optional[MongoDBStore]:
+    if not settings.mongodb_uri:
+        return None
+    key = f"{settings.environment}:{settings.mongodb_db}"
+    if key not in _MONGODB_STORES:
+        _MONGODB_STORES[key] = MongoDBStore(
+            uri=settings.mongodb_uri,
+            db_name=settings.mongodb_db,
+        )
+    return _MONGODB_STORES[key]
+
+
+def get_memory_manager(
+    rag_service: RAGService = Depends(get_rag_service),
+    mongodb_store: Optional[MongoDBStore] = Depends(get_mongodb_store),
+) -> MemoryManager:
+    from app.brain.memory_manager import MemoryManager
+    return MemoryManager(rag_service, mongodb_store)
 
 
 def get_budget_enforcer(
@@ -96,7 +150,7 @@ def get_budget_enforcer(
 
 def get_planner_agent(
     budget_enforcer: BudgetEnforcer = Depends(get_budget_enforcer),
-    llm_client: OllamaLLMClient = Depends(get_llm_client),
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
     rag_service: RAGService = Depends(get_rag_service),
 ) -> PlannerAgent:
     return PlannerAgent(
@@ -108,7 +162,7 @@ def get_planner_agent(
 
 def get_coder_agent(
     budget_enforcer: BudgetEnforcer = Depends(get_budget_enforcer),
-    llm_client: OllamaLLMClient = Depends(get_llm_client),
+    llm_client: OllamaLLMClient = Depends(get_coder_llm_client),
     rag_service: RAGService = Depends(get_rag_service),
 ) -> CoderAgent:
     return CoderAgent(
@@ -116,6 +170,13 @@ def get_coder_agent(
         llm_client=llm_client,
         rag_service=rag_service,
     )
+
+
+def get_reviewer_agent(
+    llm_client: OllamaLLMClient = Depends(get_reviewer_llm_client),
+) -> ReviewerAgent:
+    from app.agents.reviewer import ReviewerAgent
+    return ReviewerAgent(llm_client=llm_client)
 
 
 def get_auth_context() -> AuthContext:

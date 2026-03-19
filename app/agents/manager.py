@@ -102,6 +102,7 @@ class ManagerAgent:
         priority: str = "standard",
         cancel_at_state: Optional[str] = None,
         fail_at_state: Optional[str] = None,
+        history_summary: str = "",
     ) -> ManagerRunResult:
         transitions: List[str] = []
         execution_log: List[Dict[str, object]] = []
@@ -140,6 +141,7 @@ class ManagerAgent:
                 "deadline_at": time.time() + deadline_seconds,
                 "admission_code": admission_code,
             },
+            history_summary=history_summary,
         )
 
         def check_interrupt(next_state: str) -> Optional[ManagerRunResult]:

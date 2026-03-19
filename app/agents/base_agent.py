@@ -28,6 +28,7 @@ class AgentContext:
     budget_tokens: int = 0
     cancelled: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    history_summary: str = ""
 
 
 @dataclass
