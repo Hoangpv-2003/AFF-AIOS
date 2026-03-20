@@ -13,7 +13,7 @@ class OllamaLLMClient:
     base_url: str
     primary_model: str
     fallback_models: List[str]
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 120.0
     last_debug: Optional[Dict[str, object]] = None
 
     def _models_in_order(
@@ -107,7 +107,7 @@ class OllamaLLMClient:
 class OllamaEmbeddingClient:
     base_url: str
     embedding_model: str
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 120.0
 
     def embed(self, text: str) -> List[float]:
         response = httpx.post(

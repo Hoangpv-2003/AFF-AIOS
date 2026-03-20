@@ -11,52 +11,78 @@ from app.schemas.agents import CoderArtifactDraft, ReviewStatus, ReviewVerdictDr
 
 
 class ReviewerAgent(BaseAgent):
-	name = "reviewer"
+    name = "reviewer"
 
-	def __init__(
-		self, 
-		sandbox_runner: LocalSandboxRunner | None = None,
-		llm_client: Any | None = None,
-	) -> None:
-		self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
-		self.llm_client = llm_client
+    def __init__(
+        self, 
+        sandbox_runner: LocalSandboxRunner | None = None,
+        llm_client: Any | None = None,
+    ) -> None:
+        self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
+        self.llm_client = llm_client
 
-	def review_artifacts(self, artifacts: CoderArtifactDraft) -> ReviewVerdictDraft:
-		if not artifacts.files:
-			return ReviewVerdictDraft(
-				status=ReviewStatus.warn,
-				reason_code="VALIDATION_FAILED",
-				notes="No files generated",
-			)
-		if "unsafe" in artifacts.rationale.lower():
-			return ReviewVerdictDraft(
-				status=ReviewStatus.fail,
-				reason_code="SANDBOX_DENIED",
-				notes="Unsafe patterns detected",
-			)
+    def review_artifacts(self, artifacts: CoderArtifactDraft, plan_json: str = "", iteration: int = 1) -> Dict[str, Any]:
+        if not artifacts.generated_code:
+            return {"is_approved": False, "review_feedback": "No code generated."}
 
-		requires_network = "http" in artifacts.rationale.lower() or "network" in artifacts.rationale.lower()
-		result = self.sandbox_runner.run(
-			SandboxRequest(
-				skill_id="review-artifacts",
-				command="python",
-				args=artifacts.files,
-				requires_network=requires_network,
-			)
-		)
-		if not result.success:
-			return ReviewVerdictDraft(
-				status=ReviewStatus.fail,
-				reason_code="SANDBOX_DENIED",
-				notes=result.stderr,
-			)
-		return ReviewVerdictDraft(status=ReviewStatus.pass_)
+        # 1. Static Security Heuristics
+        code = artifacts.generated_code.lower()
+        if "os.system" in code or "subprocess.popen" in code:
+             return {"is_approved": False, "review_feedback": "Phát hiện lệnh thực thi hệ thống không an toàn (os.system/subprocess)."}
 
-	def act(self, context: AgentContext, inputs: Dict[str, object]) -> AgentResult:
-		artifacts_data = inputs.get("artifacts")
-		if not isinstance(artifacts_data, dict):
-			return AgentResult(success=False, reason_code="VALIDATION_FAILED")
-		artifacts = CoderArtifactDraft(**artifacts_data)
-		verdict = self.review_artifacts(artifacts)
-		return AgentResult(success=True, payload={"verdict": verdict.model_dump()})
+        # 2. LLM Review (if client available)
+        if self.llm_client:
+            from app.brain.prompt_templates import build_coder_review_messages
+            messages = build_coder_review_messages(plan_json, artifacts.generated_code, iteration)
+            try:
+                res = self.llm_client.generate(
+                    prompt=messages[1]["content"],
+                    system_prompt=messages[0]["content"]
+                )
+                import json
+                parsed = json.loads(str(res))
+                return {
+                    "is_approved": bool(parsed.get("is_approved", False)),
+                    "review_feedback": str(parsed.get("review_feedback", ""))
+                }
+            except Exception:
+                pass # Fallback to sandbox only
+
+        # 3. Sandbox Execution (Logical verification)
+        # For now, we use LocalSandboxRunner to check if it's runnable
+        result = self.sandbox_runner.run(
+            SandboxRequest(
+                skill_id="codegen_review",
+                command="python",
+                args=["-c", artifacts.generated_code], # Try to compile/run
+            )
+        )
+        if not result.success:
+            return {
+                "is_approved": False, 
+                "review_feedback": f"Sandbox error: {result.stderr}"
+            }
+            
+        return {"is_approved": True, "review_feedback": "Code looks good."}
+
+    def act(self, context: AgentContext, inputs: Dict[str, object]) -> AgentResult:
+        artifacts_data = inputs.get("artifacts")
+        if not artifacts_data and inputs.get("code_text"):
+             # Support internal direct call from CoderAgent
+             artifacts = CoderArtifactDraft(
+                 files=[], 
+                 rationale="", 
+                 generated_code=str(inputs.get("code_text"))
+             )
+        elif isinstance(artifacts_data, dict):
+            artifacts = CoderArtifactDraft(**artifacts_data)
+        else:
+            return AgentResult(success=False, reason_code="VALIDATION_FAILED")
+
+        verdict = self.review_artifacts(
+            artifacts, 
+            plan_json=str(inputs.get("plan_json", "")),
+            iteration=int(inputs.get("iteration", 1))
+        )
+        return AgentResult(success=True, payload={"verdict": verdict})
 

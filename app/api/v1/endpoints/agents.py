@@ -33,9 +33,20 @@ from app.api.dependencies import (
     get_reviewer_llm_client,
     get_reviewer_agent,
     get_memory_manager,
+    get_intent_parser_agent,
+    get_clarifier_agent,
+    get_skill_router_agent,
+    get_result_validator_agent,
+    get_error_handler_agent,
 )
 from app.agents.coder import CoderAgent
 from app.agents.manager import ManagerAgent
+from app.agents.intent_parser import IntentParserAgent
+from app.agents.clarifier import ClarifierAgent
+from app.agents.skill_router import SkillRouterAgent
+from app.agents.result_validator import ResultValidatorAgent
+from app.agents.error_handler import ErrorHandlerAgent
+from app.agents.reviewer import ReviewerAgent
 from app.brain.planner import PlannerAgent
 from app.brain.rag import RAGService
 from app.core.config import Settings
@@ -45,11 +56,38 @@ from app.skills.registry import SkillRecord, registry
 from app.brain.memory_manager import MemoryManager
 from app.brain.prompt_templates import (
     build_intent_parser_messages,
+    build_clarifier_messages,
+    build_skill_router_messages,
+)
+from app.infrastructure.sandboxes.runner import LocalSandboxRunner
+from app.infrastructure.sandboxes.models import SandboxRequest
+from app.infrastructure.sandboxes.policy import SandboxPolicy
+from app.brain.prompt_templates import (
     build_planner_messages,
     build_coder_messages,
     build_reviewer_messages,
+    build_result_validator_messages,
     build_synthesizer_messages,
-    build_result_reviewer_messages,
+    build_error_handler_messages,
+    CONTEXT_INJECTOR_TEMPLATE,
+    INTENT_PARSER_SYSTEM_PROMPT,
+    INTENT_PARSER_USER_TEMPLATE,
+    CLARIFIER_SYSTEM_PROMPT,
+    CLARIFIER_USER_TEMPLATE,
+    SKILL_ROUTER_SYSTEM_PROMPT,
+    SKILL_ROUTER_USER_TEMPLATE,
+    PLANNER_SYSTEM_PROMPT,
+    PLANNER_USER_TEMPLATE,
+    CODER_SYSTEM_PROMPT,
+    CODER_USER_TEMPLATE,
+    CODE_REVIEWER_SYSTEM_PROMPT,
+    CODE_REVIEWER_USER_TEMPLATE,
+    RESULT_VALIDATOR_SYSTEM_PROMPT,
+    RESULT_VALIDATOR_USER_TEMPLATE,
+    SYNTHESIZER_SYSTEM_PROMPT,
+    SYNTHESIZER_USER_TEMPLATE,
+    ERROR_HANDLER_SYSTEM_PROMPT,
+    ERROR_HANDLER_USER_TEMPLATE,
 )
 
 router = APIRouter()
@@ -136,28 +174,26 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _parse_intent(
-    llm_client: OllamaLLMClient,
+    agent: IntentParserAgent,
     user_message: str,
+    runtime_context: str,
     memory_context: str = "",
 ) -> dict:
     """Uses IntentParser to convert raw message to structured intent."""
-    messages = build_intent_parser_messages(user_message, memory_context)
-    # The first message is system, second is user.
-    # _generate_text_strict takes a prompt string. My building returns messages for Chat.
-    # I'll update _generate_text_strict or create a Chat version.
-    
-    # Actually, OllamaLLMClient has generate() which usually takes a prompt.
-    # I'll assume generate() can take a full prompt string or I'll join messages.
-    full_prompt = f"{messages[0]['content']}\n\n{messages[1]['content']}"
-    
-    try:
-        raw = _generate_text_strict(llm_client, full_prompt, response_format="json")
-        print(f"DEBUG: Intent Raw JSON: {raw}")
-        intent = json.loads(raw)
-        return intent
-    except Exception as exc:
-        print(f"DEBUG: Intent Parsing Error: {exc}")
-        return {"action_type": "retrieve", "goal": "fallback", "clarification_needed": True, "clarification_hint": str(exc)}
+    res = agent.act(
+        AgentContext(task_id="intent", prompt=user_message),
+        {"message": user_message, "runtime_context": runtime_context, "memory_context": memory_context}
+    )
+    if res.success:
+        return res.payload
+    return {
+        "action_type": "chat",
+        "goal": "fallback",
+        "confidence": 0.0,
+        "ambiguous": True,
+        "clarification_needed": True,
+        "clarification_hint": f"Lỗi hệ thống khi phân tích ý định: {res.reason_code}"
+    }
 
 
 _SKILL_CONTRACT = """\
@@ -322,31 +358,50 @@ def _execute_skill(root: Path, skill_name: str, **kwargs) -> dict:
             "collected_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    module_name = f"aaf_skill_{uuid.uuid4().hex[:8]}"
+    # Use LocalSandboxRunner with Networking enabled for real side effects
+    policy = SandboxPolicy(allow_network=True)
+    runner = LocalSandboxRunner(policy=policy)
+    
+    wrapper_path = root / "app" / "infrastructure" / "sandboxes" / "skill_wrapper.py"
+    input_json = json.dumps(kwargs, ensure_ascii=False)
+    
+    request = SandboxRequest(
+        skill_id=skill_name,
+        command="python",
+        args=[str(wrapper_path), str(skill_path), input_json],
+        timeout_seconds=30
+    )
+    
     try:
-        spec = importlib.util.spec_from_file_location(module_name, skill_path)
-        if spec is None or spec.loader is None:
-            raise ImportError("Cannot load skill spec")
-
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
-
-        run_fn = getattr(module, "run", None)
-        if not callable(run_fn):
-            raise AttributeError("Skill khong co ham run()")
-
-        # Execute with kwargs if provided
-        # Execute with input_data as the primary argument
-        output = run_fn(input_data=kwargs)
-        if not isinstance(output, dict):
+        res = runner.run(request)
+        if not res.success:
             return {
                 "status": "error",
-                "error_reason": (
-                    f"run() tra ve {type(output).__name__}, expected dict"
-                ),
-                "raw_output": str(output)[:500],
+                "error_reason": f"Sandbox execution failed: {res.stderr}",
+                "stdout": res.stdout,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
             }
+            
+        # Parse output from wrapper
+        try:
+            output = json.loads(res.stdout)
+            if not isinstance(output, dict):
+                output = {"status": "success", "raw_output": str(output)}
+            return output
+        except Exception as e:
+            return {
+                "status": "error",
+                "error_reason": f"Failed to parse skill output: {str(e)}",
+                "raw_stdout": res.stdout,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+            }
+            
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error_reason": f"Runtime exception: {str(exc)}",
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+        }
         output.setdefault("collected_at", datetime.now(timezone.utc).isoformat())
         return output
 
@@ -817,6 +872,7 @@ async def _step_materialize(
     message: str,
     intent: dict,
     planner: PlannerAgent,
+    router: SkillRouterAgent,
     coder: CoderAgent,
     reviewer: ReviewerAgent,
     llm_client: OllamaLLMClient,
@@ -825,135 +881,132 @@ async def _step_materialize(
     settings: Settings,
     force_new: bool = False,
     debug: bool = False,
-    history_summary: str = "",
-) -> Optional[dict]:
-    """Generates execution plan (multi-skill) and creates skills via Coder & Reviewer."""
+    runtime_context: str,
+    memory_context: str = "",
+    total_llm_calls: int = 0,
+) -> Tuple[Optional[dict], int]:
+    """Generates execution plan, routes skills, and handles coding/review loop."""
     root = _repo_root()
 
     # 1. Planner Phase
-    plan_messages = build_planner_messages(json.dumps(intent, ensure_ascii=False), history_summary)
-    plan_prompt = f"{plan_messages[0]['content']}\n\n{plan_messages[1]['content']}"
+    res_plan = planner.act(
+        AgentContext(task_id=task_id, prompt=message, history_summary=memory_context),
+        {
+            "intent_json": str(intent), 
+            "runtime_context": runtime_context,
+            "validator_feedback": memory_context.split("RETRY_NOTE: ")[-1] if "RETRY_NOTE: " in memory_context else ""
+        }
+    )
+    total_llm_calls += 1
+    if not res_plan.success:
+        plan_data = {"skills_to_create": []}
+    else:
+        plan_data = res_plan.payload.get("plan", {"skills_to_create": []})
+
+    # 2. Skill Router Phase
+    available_skills_list = []
+    for folder in ["static", "dynamic"]:
+        path = root / "app" / "skills" / folder
+        if path.exists():
+            available_skills_list.extend([f.stem for f in path.glob("*.py")])
     
-    try:
-        plan_raw = _generate_text_strict(llm_client, plan_prompt, response_format="json")
-        print(f"DEBUG: Plan Raw: {plan_raw}")
-        plan_data = json.loads(plan_raw)
-    except Exception as exc:
-        print(f"DEBUG: Plan parsing error: {exc}")
-        plan_data = {}
+    res_route = router.act(
+        AgentContext(task_id=task_id, prompt=message),
+        {
+            "plan_json": json.dumps(plan_data, ensure_ascii=False),
+            "available_skills": ", ".join(available_skills_list),
+            "data_sources": "Tavily, Local_DB, RAG", 
+            "runtime_context": runtime_context
+        }
+    )
+    total_llm_calls += 1
+    
+    if not res_route.success:
+        router_data = {"route": "create_new", "skills_to_build": [s["skill_name"] for s in plan_data.get("skills_to_create", [])]}
+    else:
+        router_data = res_route.payload
 
-    skills_to_create = plan_data.get("skills_to_create") or []
-    if not skills_to_create:
-        # Fallback to single skill if planner is uncooperative
-        skills_to_create = [{
-            "skill_name": _slugify(intent.get("goal") or message),
-            "is_static": intent.get("action_type") in ["schedule", "deliver"],
-            "skill_purpose": intent.get("goal") or message,
-            "coder_notes": f"Implement this task: {message}",
-            "input_keys": [],
-            "output_keys": []
-        }]
+    print(f"DEBUG: Router Decision: {router_data.get('route')} - {router_data.get('routing_reason')}")
 
+    # 3. Execution Path Handling
     all_materialized = []
-    for skill_spec in skills_to_create:
-        skill_name = _slugify(skill_spec.get("skill_name") or "generated-skill")
-        is_static = bool(skill_spec.get("is_static", False))
-        skill_purpose = skill_spec.get("skill_purpose") or message
-        coder_notes = skill_spec.get("coder_notes") or skill_purpose
-        output_keys = skill_spec.get("output_keys") or []
-        folder = "static" if is_static else "dynamic"
+    skills_to_build = router_data.get("skills_to_build", [])
+    
+    # Handle direct runs first - with existence validation
+    for skill_name in router_data.get("skills_to_use", []):
+        exists = False
+        for folder in ["static", "dynamic"]:
+            if (root / "app" / "skills" / folder / f"{skill_name}.py").exists():
+                exists = True
+                break
+        
+        if exists:
+            all_materialized.append({
+                "materialized_skill": {
+                    "skill_id": skill_name,
+                    "reused_existing": True,
+                },
+                "parameters": intent.get("entities") or {},
+            })
+        else:
+            print(f"WARNING: Router hallucinated skill '{skill_name}'. Moving to build queue.")
+            if skill_name not in skills_to_build:
+                skills_to_build.append(skill_name)
 
-        # 2. Skill Reuse Logic (Lookup static/dynamic)
-        if not force_new:
-            # Check primary folder
-            primary_path = root / "app" / "skills" / folder / f"{skill_name}.py"
-            # Also check alternative folder
-            alt_folder = "dynamic" if is_static else "static"
-            alt_path = root / "app" / "skills" / alt_folder / f"{skill_name}.py"
+    # Handle Coding / Patching
+    for skill_spec in plan_data.get("skills_to_create", []):
+        name = skill_spec["skill_name"]
+        if name not in skills_to_build:
+            continue
             
-            found_path = None
-            if primary_path.exists(): found_path = primary_path
-            elif alt_path.exists(): found_path = alt_path
+        is_static = skill_spec.get("is_static", False)
+        folder = "static" if is_static else "dynamic"
+        patch_mode = "delta" if router_data.get("route") == "patch" else "create_new"
+        
+        print(f"DEBUG: Coding skill '{name}' (mode={patch_mode})")
+        
+        # Call CoderAgent.act which now has its own internal review loop and static analysis
+        res_coder = coder.act(
+            AgentContext(task_id=task_id, prompt=message),
+            {
+                "plan": plan_data,
+                "skill_name": name,
+                "runtime_context": runtime_context,
+                "patch_mode": patch_mode,
+                "memory_context": memory_context,
+                "total_llm_calls": total_llm_calls
+            }
+        )
+        total_llm_calls = res_coder.payload.get("total_llm_calls", total_llm_calls)
+        
+        if res_coder.success:
+            artifacts = res_coder.payload.get("artifacts", {})
+            code_text = artifacts.get("generated_code", "")
             
-            if found_path:
-                print(f"DEBUG: Reusing existing skill '{skill_name}' at {found_path.relative_to(root)}")
+            if code_text:
+                # Save the skill
+                save_path = root / "app" / "skills" / folder / f"{name}.py"
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                save_path.write_text(code_text, encoding="utf-8")
+                
                 all_materialized.append({
                     "materialized_skill": {
-                        "skill_id": skill_name,
-                        "reused_existing": True,
-                        "files": [str(found_path.relative_to(root)).replace("\\", "/")],
-                        "is_static": ("static" in str(found_path)),
+                        "skill_id": name,
+                        "reused_existing": False,
+                        "is_static": is_static,
                     },
                     "parameters": intent.get("entities") or {},
                 })
-                continue
-
-        # 3. Coder & Reviewer Phase (Attempt creation)
-        print(f"DEBUG: Creating skill '{skill_name}' (is_static={is_static})")
-        coder_messages = build_coder_messages(json.dumps(plan_data, ensure_ascii=False), skill_name, history_summary)
-        coder_prompt = f"{coder_messages[0]['content']}\n\n{coder_messages[1]['content']}"
-        
-        MAX_RETRIES = 3
-        code_text = ""
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                code_text = _generate_text_strict(llm_client, coder_prompt)
-            except ValueError: continue
-
-            reviewer_messages = build_reviewer_messages(code_text, output_keys)
-            rev_prompt = f"{reviewer_messages[0]['content']}\n\n{reviewer_messages[1]['content']}"
-            
-            try:
-                rev_raw = _generate_text_strict(reviewer_llm_client, rev_prompt, response_format="json")
-                review = json.loads(rev_raw)
-            except Exception:
-                review = {"verdict": "pass"} # Contingency
-
-            if review.get("verdict") in ["pass", "warn"]:
-                break
-            
-            # Feed errors back to coder
-            coder_prompt += f"\n\n## Feedback from CodeReviewer (Attempt {attempt})\n"
-            coder_prompt += f"Verdict: {review.get('verdict')}\nIssues: {', '.join(review.get('issues', []))}\n"
-            coder_prompt += f"Must fix: {', '.join(review.get('must_fix', []))}\n"
-
-        if not code_text.strip():
-            continue
-
-        # 4. Persistence
-        flat_dir = root / "app" / "skills" / folder
-        flat_dir.mkdir(parents=True, exist_ok=True)
-        (flat_dir / f"{skill_name}.py").write_text(code_text + "\n", encoding="utf-8")
-
-        all_materialized.append({
-            "materialized_skill": {
-                "skill_id": skill_name,
-                "reused_existing": False,
-                "files": [str((flat_dir / f"{skill_name}.py").relative_to(root)).replace("\\", "/")],
-                "is_static": is_static,
-            },
-            "parameters": intent.get("entities") or {},
-        })
 
     if not all_materialized:
-        return None
+        return None, total_llm_calls
 
     return {
-        "materialized_skill": all_materialized[-1]["materialized_skill"],
-        "parameters": all_materialized[-1]["parameters"],
         "all_materialized_skills": all_materialized,
-        "plan": plan_data
-    }
+        "plan": plan_data,
+        "router": router_data
+    }, total_llm_calls
 
-    if not all_materialized:
-        return None
-
-    return {
-        "materialized_skill": all_materialized[-1]["materialized_skill"],
-        "parameters": all_materialized[-1]["parameters"],
-        "all_materialized_skills": all_materialized,
-        "plan": plan_data
-    }
 
 
 def _step_execute_and_summarize(
@@ -962,23 +1015,23 @@ def _step_execute_and_summarize(
     message: str,
     materialize_data: Optional[dict],
     llm_client: OllamaLLMClient,
+    validator: ResultValidatorAgent,
+    runtime_context: str,
+    total_llm_calls: int = 0,
     input_data: Optional[dict] = None,
-) -> dict:
-    """Executes skills sequentially and synthesizes final response."""
+) -> Tuple[dict, int]:
+    """Executes skills and validates results."""
     if not materialize_data:
-        return {"skill_output": {"status": "error", "summary": "No skills available."}, "reply": "I couldn't materialize any skills."}
+        return {"status": "error", "error_type": "no_materialize_data"}
 
     all_skills = materialize_data.get("all_materialized_skills") or []
-    if not all_skills:
-        return {"skill_output": {"status": "error", "summary": "Empty skill list."}, "reply": "No skills found to execute."}
-
     accumulated_data = dict(materialize_data.get("parameters") or {})
     if input_data:
         accumulated_data.update(input_data)
     
-    last_output = {}
     skill_history = []
-    
+    last_output = {}
+
     # 1. Sequential Execution
     for skill_info in all_skills:
         skill_id = (skill_info.get("materialized_skill") or {}).get("skill_id")
@@ -988,48 +1041,72 @@ def _step_execute_and_summarize(
         last_output = _execute_skill(root, skill_id, **accumulated_data)
         skill_history.append({"skill_id": skill_id, "output": last_output})
         
-        # Merge successful output into accumulated_data for next skill
         if last_output.get("status") == "success":
             accumulated_data.update(last_output)
         else:
             print(f"WARNING: Skill '{skill_id}' failed: {last_output.get('summary')}")
-            # We CONTINUE to the next skill unless it's a critical failure
-            # This allows the 'deliver' (email) skill to try and send the current status even if search partially failed
-            continue
+            # Continue to next skill regardless, logic as before
 
-    # 2. Result Review Phase
-    plan = materialize_data.get("plan", {})
-    output_keys = []
-    for s in plan.get("skills_to_create", []):
-        output_keys.extend(s.get("output_keys", []))
+    # 2. Result Validator Phase
+    goal = (materialize_data.get("plan") or {}).get("task_summary", message)
+    res_val = validator.act(
+        AgentContext(task_id="validator", prompt=message),
+        {
+            "original_request": message,
+            "skill_output": json.dumps(accumulated_data, ensure_ascii=False),
+            "expected_goal": goal,
+            "runtime_context": runtime_context
+        }
+    )
+    total_llm_calls += 1
     
-    rev_messages = build_result_reviewer_messages(message, json.dumps(last_output, ensure_ascii=False), output_keys)
-    rev_prompt = f"{rev_messages[0]['content']}\n\n{rev_messages[1]['content']}"
-    
-    try:
-        rev_raw = _generate_text_strict(llm_client, rev_prompt, response_format="json")
-        review = json.loads(rev_raw)
-    except Exception:
-        review = {"passed": (last_output.get("status") == "success"), "score": 5}
+    if not res_val.success:
+        validator_data = {"isValid": True, "result_code": "READY_FOR_SYNTHESIS"}
+    else:
+        validator_data = res_val.payload
+        print(f"DEBUG: Validator Result: {validator_data.get('result_code')}")
 
-    # 3. Synthesis Phase
+    # 3. Decision logic
+    result_code = validator_data.get("result_code")
+    
+    if result_code == "REQUEST_REPLAN":
+        return {
+            "status": "replan",
+            "retry_instruction": validator_data.get("retry_instruction"),
+            "accumulated_data": accumulated_data,
+            "skill_history": skill_history
+        }
+    
+    if result_code == "ESCALATE_TO_ERROR_HANDLER":
+        return {
+            "status": "error",
+            "error_type": "validation_failed",
+            "error_detail": validator_data.get("error_detail"),
+            "accumulated_data": accumulated_data,
+            "skill_history": skill_history
+        }
+
+    # 4. Synthesizer Phase (READY_FOR_SYNTHESIS)
     synth_messages = build_synthesizer_messages(message, json.dumps(accumulated_data, ensure_ascii=False))
     synth_prompt = f"{synth_messages[0]['content']}\n\n{synth_messages[1]['content']}"
     
     try:
         synth_raw = _generate_text_strict(llm_client, synth_prompt, response_format="json")
-        synth = json.loads(synth_raw)
-        reply = synth.get("response") or last_output.get("summary") or "Task completed with results."
+        synth_data = json.loads(synth_raw)
+        reply = synth_data.get("reply") or last_output.get("summary") or "Xong."
     except Exception:
-        reply = last_output.get("summary") or "The process finished, but I couldn't summarize the details professionally."
+        reply = last_output.get("summary") or "Đã thực hiện xong yêu cầu của bạn."
 
-    return {
-        "skill_output": last_output,
+    total_llm_calls += 1 # Synthesizer
+
+    return ({
+        "status": "success",
         "reply": reply,
-        "review": review,
+        "skill_output": last_output,
         "accumulated_data": accumulated_data,
-        "skill_history": skill_history
-    }
+        "skill_history": skill_history,
+        "validator": validator_data
+    }, total_llm_calls)
 
 
 @router.post("/run")
@@ -1367,16 +1444,21 @@ async def run_and_materialize(
 async def chat_agent(
     payload: AgentChatRequest,
     background_tasks: BackgroundTasks,
+    intent_parser: IntentParserAgent = Depends(get_intent_parser_agent),
+    clarifier: ClarifierAgent = Depends(get_clarifier_agent),
     planner: PlannerAgent = Depends(get_planner_agent),
+    router: SkillRouterAgent = Depends(get_skill_router_agent),
     coder: CoderAgent = Depends(get_coder_agent),
     reviewer: ReviewerAgent = Depends(get_reviewer_agent),
+    validator: ResultValidatorAgent = Depends(get_result_validator_agent),
+    error_handler: ErrorHandlerAgent = Depends(get_error_handler_agent),
     agent_llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
     reviewer_llm_client: OllamaLLMClient = Depends(get_reviewer_llm_client),
     rag_service: RAGService = Depends(get_rag_service),
     settings: Settings = Depends(get_settings_dep),
     memory: MemoryManager = Depends(get_memory_manager),
 ):
-    """Main entry point for agentic chat pipeline with persistent memory."""
+    """Main entry point for the new Refructured Agent Pipeline."""
     message = payload.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message must not be empty")
@@ -1385,182 +1467,157 @@ async def chat_agent(
     user_id = payload.user_email or "default-user"
     root = _repo_root()
     
-    # 1. Memory Context Retrieval — with timeout guard (cloud services can be slow)
+    # 0. Context Injection & History Retrieval
+    history = []
     if payload.conversation_history:
-        history_lines = [f"{m.role.capitalize()}: {m.content}" for m in payload.conversation_history]
-        recent_history = "\n---\n".join(history_lines)
-    elif payload.conversation_history == []:
-        recent_history = "No recent history."
+        for m in payload.conversation_history:
+            history.append({"role": m.role, "content": m.content})
     else:
         try:
-            recent_history = memory.get_recent_history(user_id=user_id, limit=5)
+            # Fallback to memory manager history if not provided in payload
+            raw_history = memory.get_recent_history(user_id=user_id, limit=6)
+            if isinstance(raw_history, str):
+                for line in raw_history.split("\n---\n"):
+                    if ":" in line:
+                        role, content = line.split(":", 1)
+                        history.append({"role": role.strip().lower(), "content": content.strip()})
         except Exception:
-            recent_history = ""
+            pass
 
-    # Qdrant cloud search — wrapped with timeout to prevent hanging
+    from app.brain.prompt_templates import build_runtime_context
+    runtime_context = build_runtime_context(history=history)
+
+    # Semantic context
     try:
-        import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-            _fut = _pool.submit(memory.get_context, message, user_id, 4)
-            try:
-                semantic_context = _fut.result(timeout=4.0)
-            except _cf.TimeoutError:
-                print("DEBUG: Qdrant timeout — skipping semantic context")
-                semantic_context = ""
-    except Exception as _e:
-        print(f"DEBUG: Memory.get_context error: {_e}")
+        semantic_context = memory.get_context(message, user_id, 4)
+    except Exception:
         semantic_context = ""
 
-    full_memory_context = (
-        "### RECENT HISTORY\n"
-        f"{recent_history}\n\n"
-        "### RELEVANT FACTS\n"
-        f"{semantic_context or 'No prior facts.'}"
-    )
-
-    # 2. Step: Intent Parsing
-    print(f"DEBUG: Pipeline starting for task {task_id}", flush=True)
-    intent = _parse_intent(agent_llm_client, message, full_memory_context)
-    action_type = intent.get("action_type", "chat")
-    print(f"DEBUG: action_type={action_type}", flush=True)
-
-    # 2.1 Memorize Long-term Facts
-    facts = intent.get("entities", {}).get("facts_to_remember", [])
-    for fact in facts:
-        print(f"DEBUG: Learning fact: {fact}")
-        memory.store_fact(user_id, fact)
-
-    skill_output: dict = {}
-    review = None
-    materialize_data = None
-
-    # ── FAST PATH A: simple conversation ─────────────────────────────────
-    if action_type in ("chat",) or (not intent.get("entities", {}).get("topic") and action_type == "retrieve"):
-        print("DEBUG: fast-path CHAT")
-        prompt = (
-            "## Role\nYou are a helpful AI Assistant.\n\n"
-            f"## Memory\n{full_memory_context}\n\n"
-            f"## User\n{message}\n\n"
-            "Respond naturally in Vietnamese."
+    # 1. Intent Parsing
+    print(f"DEBUG: Pipeline starting for task {task_id}")
+    total_llm_calls = 0
+    intent = _parse_intent(intent_parser, message, runtime_context, semantic_context)
+    total_llm_calls += 1
+    
+    # 1.1 Clarifier Gate
+    if intent.get("ambiguous") or intent.get("clarification_needed"):
+        hint = intent.get("clarification_hint") or "Bạn có thể nói rõ hơn không?"
+        res_clarify = clarifier.act(
+            AgentContext(task_id=task_id, trace_id=task_id, prompt=message),
+            {"message": message, "hint": hint, "runtime_context": runtime_context}
         )
-        reply = _generate_text_strict(agent_llm_client, prompt)
-        skill_output = {"status": "success", "summary": "Direct answer"}
-
-    # ── FAST PATH B: retrieve / image search (NO email, NO schedule) ─────
-    elif action_type == "retrieve" and not intent.get("entities", {}).get("recipient") and not intent.get("entities", {}).get("schedule_time"):
-        print("DEBUG: fast-path RETRIEVE via Tavily")
-        topic = intent.get("entities", {}).get("topic", message)
-        try:
-            import httpx, os
-            tavily_key = os.getenv("TAVILY_API_KEY", "")
-            resp = httpx.post(
-                "https://api.tavily.com/search",
-                json={"api_key": tavily_key, "query": topic, "search_depth": "basic",
-                      "include_images": True, "max_results": 5},
-                timeout=15
-            )
-            data = resp.json() if resp.status_code == 200 else {}
-        except Exception as e:
-            data = {}
-            print(f"DEBUG: Tavily error: {e}")
-
-        image_urls = data.get("images", [])
-        results = data.get("results", [])
-        summary_text = "\n".join([f"- {r.get('title','')}: {r.get('content','')[:200]}" for r in results[:3]])
-
-        # Build natural reply using LLM
-        reply_prompt = (
-            f"Người dùng muốn: {message}\n\n"
-            f"Kết quả tìm kiếm:\n{summary_text or topic}\n\n"
-            "Hãy tóm tắt thông tin này thành câu trả lời ngắn gọn, tự nhiên bằng tiếng Việt. "
-            "KHÔNG đề cập đến lịch trình hay gửi email."
-        )
-        reply = _generate_text_strict(agent_llm_client, reply_prompt)
-        skill_output = {
-            "status": "success",
-            "summary": f"Found {len(results)} results, {len(image_urls)} images",
-            "image_urls": image_urls,
-            "results": results,
+        total_llm_calls += 1
+        
+        if res_clarify.success:
+            reply = res_clarify.payload.get("question_to_user") or hint
+        else:
+            reply = hint
+            
+        return {
+            "task_id": task_id,
+            "reply": reply,
+            "total_llm_calls": total_llm_calls,
+            "artifacts": {"intent": intent}
         }
 
-    # ── FULL PIPELINE: deliver / schedule / analyse / pipeline ───────────
-    else:
-        print(f"DEBUG: full pipeline for action_type={action_type}")
-        if intent.get("clarification_needed"):
-            memory.store_chat_turn(user_id, message, intent.get("clarification_hint", ""))
-            return {
-                "task_id": task_id,
-                "reply": intent.get("clarification_hint") or "Bạn có thể cung cấp thêm chi tiết không?",
-                "artifacts": {"intent": intent}
-            }
+    # 1.2 Memorize Facts
+    facts = intent.get("entities", {}).get("facts_to_remember", [])
+    for fact in facts:
+        memory.store_fact(user_id, fact)
 
-        materialize_data = await _step_materialize(
+    # 2. Planning & Execution Loop (Up to 2 re-plans)
+    replan_count = 0
+    MAX_REPLANS = 2
+    retry_instruction = ""
+    
+    materialize_data = None
+    exec_result = {}
+    
+    while replan_count <= MAX_REPLANS:
+        # 3. Planning & Routing & Coding
+        print(f"DEBUG: Planning phase (Iteration {replan_count})")
+        materialize_data, total_llm_calls = await _step_materialize(
             task_id=task_id,
             message=message,
             intent=intent,
             planner=planner,
+            router=router,
             coder=coder,
             reviewer=reviewer,
             llm_client=agent_llm_client,
             reviewer_llm_client=reviewer_llm_client,
             rag_service=rag_service,
             settings=settings,
-            force_new=payload.force_new,
-            history_summary=full_memory_context
+            runtime_context=runtime_context,
+            memory_context=f"{semantic_context}\n\nRETRY_NOTE: {retry_instruction}" if retry_instruction else semantic_context,
+            total_llm_calls=total_llm_calls
         )
+        
+        if not materialize_data:
+            break
 
-        if materialize_data:
-            exec_result = _step_execute_and_summarize(
-                root=root,
-                message=message,
-                materialize_data=materialize_data,
-                llm_client=agent_llm_client
-            )
-            reply = exec_result.get("reply", "")
-            skill_output = exec_result.get("skill_output") or {}
-            review = exec_result.get("review")
+        # 4. Execution & Validation
+        print(f"DEBUG: Execution phase")
+        exec_result, total_llm_calls = _step_execute_and_summarize(
+            root=root,
+            message=message,
+            materialize_data=materialize_data,
+            llm_client=agent_llm_client,
+            validator=validator,
+            runtime_context=runtime_context,
+            total_llm_calls=total_llm_calls
+        )
+        
+        if exec_result.get("status") == "replan":
+            replan_count += 1
+            retry_instruction = exec_result.get("retry_instruction", "Vui lòng điều chỉnh kế hoạch để đạt được kết quả tốt hơn.")
+            print(f"DEBUG: Re-plan requested. Reason: {retry_instruction}")
+            continue
+        
+        break
+
+    # 5. Final Response or Error Handling
+    if exec_result.get("status") == "success":
+        reply = exec_result.get("reply")
+    else:
+        # 6. Error Handler Phase
+        print(f"DEBUG: Escalating to Error Handler")
+        res_err = error_handler.act(
+            AgentContext(task_id=task_id, trace_id=task_id, prompt=message),
+            {
+                "failure_stage": "Execution/Validation",
+                "technical_error": exec_result.get("error_detail") or "Pipeline failed after maximum attempts."
+            }
+        )
+        if res_err.success:
+            reply = res_err.payload.get("user_message")
         else:
-            skill_output = {"status": "success", "summary": "No skills needed."}
-            prompt = (
-                f"## Context\n{full_memory_context}\n\nUser: {message}\n\n"
-                "Trả lời ngắn gọn bằng tiếng Việt."
-            )
-            reply = _generate_text_strict(agent_llm_client, prompt)
+            reply = "Xin lỗi, tôi gặp sự cố kỹ thuật và không thể hoàn thành yêu cầu này lúc này."
 
-    # 5. Persistent Turn Storage (background queue)
+    # Background tasks
     background_tasks.add_task(memory.store_chat_turn, user_id, message, str(reply))
 
-    # 6. Build final response
+    # Build artifacts for UI
     artifacts: dict[str, Any] = {
         "intent": intent,
-        "skill_output": skill_output,
-        "review": review,
+        "skill_output": exec_result.get("skill_output", {}),
         "materialize_data": materialize_data,
+        "history": history
     }
-
-    # Surface image URLs to top-level for easy frontend consumption
-    if skill_output and isinstance(skill_output, dict):
-        if skill_output.get("image_urls"):
-            artifacts["image_urls"] = skill_output["image_urls"]
-        if skill_output.get("image_url"):
-            artifacts["image_urls"] = [skill_output["image_url"]]
-
-    # Surface base64 charts
-    image_b64 = _extract_chart_base64(skill_output)
+    
+    # Extract images
+    image_urls = exec_result.get("accumulated_data", {}).get("image_urls", [])
+    if image_urls:
+        artifacts["image_urls"] = image_urls
+    
+    image_b64 = _extract_chart_base64(exec_result.get("skill_output", {}))
     if image_b64:
         artifacts["image_base64"] = image_b64
-
-    if payload.debug:
-        artifacts["debug"] = {
-            "extracted_facts": facts,
-            "intent_raw": intent,
-            "plan_raw": materialize_data.get("plan") if materialize_data else None,
-            "planner_used": action_type,
-        }
 
     return {
         "task_id": task_id,
         "reply": reply,
+        "total_llm_calls": total_llm_calls,
         "artifacts": artifacts,
     }
 

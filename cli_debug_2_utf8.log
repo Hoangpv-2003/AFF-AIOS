@@ -1,0 +1,16 @@
+﻿./.venv/Scripts/python.exe : Traceback (most recent call last):
+At line:1 char:62
++ ... o "Hello" | ./.venv/Scripts/python.exe tools/cli_agent.py --real > cl ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "D:\ZaloPC\AAF - AIOS\tools\cli_agent.py", line 184, in <module>
+    main()
+  File "D:\ZaloPC\AAF - AIOS\tools\cli_agent.py", line 75, in main
+    rag_service = get_rag_service()
+  File "D:\ZaloPC\AAF - AIOS\app\api\dependencies.py", line 122, in get_rag_service
+    vector_store = get_vector_store(settings)
+  File "D:\ZaloPC\AAF - AIOS\app\api\dependencies.py", line 97, in get_vector_store
+    if settings is None or isinstance(settings, Depends):
+TypeError: isinstance() arg 2 must be a type or tuple of types

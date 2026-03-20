@@ -5,8 +5,14 @@ from __future__ import annotations
 from typing import Dict, List
 
 from fastapi import Depends
+from fastapi.params import Depends as DependsClass
 
 from app.agents.coder import CoderAgent
+from app.agents.intent_parser import IntentParserAgent
+from app.agents.clarifier import ClarifierAgent
+from app.agents.skill_router import SkillRouterAgent
+from app.agents.result_validator import ResultValidatorAgent
+from app.agents.error_handler import ErrorHandlerAgent
 from app.brain.rag import EmbeddingClient, RAGService
 from app.brain.planner import PlannerAgent
 from app.core.config import Settings, get_settings
@@ -37,9 +43,11 @@ def get_settings_dep() -> Settings:
 
 
 def get_llm_client(
-    settings: Settings = Depends(get_settings_dep),
+    settings: Settings = None,
     model_name: Optional[str] = None,
 ) -> OllamaLLMClient:
+    if settings is None or isinstance(settings, DependsClass):
+        settings = get_settings()
     return OllamaLLMClient(
         base_url=settings.ollama_base_url,
         primary_model=model_name or settings.ollama_chat_model,
@@ -50,26 +58,34 @@ def get_llm_client(
 
 
 def get_agent_llm_client(
-    settings: Settings = Depends(get_settings_dep),
+    settings: Settings = None,
 ) -> OllamaLLMClient:
+    if settings is None or isinstance(settings, DependsClass):
+        settings = get_settings()
     return get_llm_client(settings, model_name=settings.ollama_agent_model)
 
 
 def get_coder_llm_client(
-    settings: Settings = Depends(get_settings_dep),
+    settings: Settings = None,
 ) -> OllamaLLMClient:
+    if settings is None or isinstance(settings, DependsClass):
+        settings = get_settings()
     return get_llm_client(settings, model_name=settings.ollama_coder_model)
 
 
 def get_reviewer_llm_client(
-    settings: Settings = Depends(get_settings_dep),
+    settings: Settings = None,
 ) -> OllamaLLMClient:
+    if settings is None or isinstance(settings, DependsClass):
+        settings = get_settings()
     return get_llm_client(settings, model_name=settings.ollama_reviewer_model)
 
 
 def get_embedding_client(
-    settings: Settings = Depends(get_settings_dep),
-) -> EmbeddingClient:
+    settings: Any = None,
+) -> Any:
+    if settings is None or isinstance(settings, DependsClass):
+        settings = get_settings()
     return OllamaEmbeddingClient(
         base_url=settings.ollama_base_url,
         embedding_model=settings.ollama_embedding_model,
@@ -77,8 +93,10 @@ def get_embedding_client(
 
 
 def get_vector_store(
-    settings: Settings = Depends(get_settings_dep),
+    settings: Settings = None,
 ) -> Any:
+    if settings is None or isinstance(settings, DependsClass):
+        settings = get_settings()
     key = f"{settings.environment}:{settings.vector_provider}"
     if key not in _VECTOR_STORES:
         if not settings.demo_mode and settings.qdrant_url:
@@ -95,10 +113,17 @@ def get_vector_store(
 
 
 def get_rag_service(
-    settings: Settings = Depends(get_settings_dep),
-    vector_store: ChromaMemoryStore = Depends(get_vector_store),
-    embedding_client: EmbeddingClient = Depends(get_embedding_client),
-) -> RAGService:
+    settings: Any = None,
+    vector_store: Any = None,
+    embedding_client: Any = None,
+) -> Any:
+    if settings is None or isinstance(settings, DependsClass):
+        settings = get_settings()
+    if vector_store is None or isinstance(vector_store, DependsClass):
+        vector_store = get_vector_store(settings)
+    if embedding_client is None or isinstance(embedding_client, DependsClass):
+        embedding_client = get_embedding_client(settings)
+        
     key = f"{settings.environment}:ollama:{settings.vector_provider}"
     if key not in _RAG_SERVICES:
         _RAG_SERVICES[key] = RAGService(
@@ -177,6 +202,36 @@ def get_reviewer_agent(
 ) -> ReviewerAgent:
     from app.agents.reviewer import ReviewerAgent
     return ReviewerAgent(llm_client=llm_client)
+
+
+def get_intent_parser_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> IntentParserAgent:
+    return IntentParserAgent(llm_client=llm_client)
+
+
+def get_clarifier_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> ClarifierAgent:
+    return ClarifierAgent(llm_client=llm_client)
+
+
+def get_skill_router_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> SkillRouterAgent:
+    return SkillRouterAgent(llm_client=llm_client)
+
+
+def get_result_validator_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> ResultValidatorAgent:
+    return ResultValidatorAgent(llm_client=llm_client)
+
+
+def get_error_handler_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> ErrorHandlerAgent:
+    return ErrorHandlerAgent(llm_client=llm_client)
 
 
 def get_auth_context() -> AuthContext:

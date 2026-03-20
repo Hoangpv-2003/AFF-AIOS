@@ -14,17 +14,25 @@ class ReviewStatus(str, Enum):
     fail = "fail"
 
 
+class SkillSpec(BaseModel):
+    skill_name: str
+    is_static: bool = False
+    skill_purpose: str
+    input_keys: list[str] = Field(default_factory=list)
+    output_keys: list[str] = Field(default_factory=list)
+    coder_notes: str
+
+
 class Plan(BaseModel):
-    objective: str
-    steps: list[str] = Field(default_factory=list)
+    task_summary: str
+    skills_to_create: list[SkillSpec] = Field(default_factory=list)
     confidence: float = 0.0
-    architectural_decisions: Optional[dict] = Field(default=None)
-    planner_notes: Optional[str] = Field(default=None)
 
 
 class CoderArtifact(BaseModel):
     files: list[str] = Field(default_factory=list)
     rationale: str
+    generated_code: str = ""
 
 
 class ReviewVerdict(BaseModel):
