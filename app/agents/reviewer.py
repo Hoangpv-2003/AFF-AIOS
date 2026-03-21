@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Any, Dict
 
 from app.agents.base_agent import AgentContext, AgentResult, BaseAgent
 from app.infrastructure.sandboxes.models import SandboxRequest
@@ -21,14 +21,40 @@ class ReviewerAgent(BaseAgent):
         self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
         self.llm_client = llm_client
 
-    def review_artifacts(self, artifacts: CoderArtifactDraft, plan_json: str = "", iteration: int = 1) -> Dict[str, Any]:
+    def review_artifacts(
+        self,
+        artifacts: CoderArtifactDraft,
+        plan_json: str = "",
+        iteration: int = 1,
+    ) -> ReviewVerdictDraft:
         if not artifacts.generated_code:
-            return {"is_approved": False, "review_feedback": "No code generated."}
+            joined = " ".join(artifacts.files) + " " + artifacts.rationale
+            lowered = joined.lower()
+            if "http" in lowered or "net" in lowered or "network" in lowered:
+                sandbox = self.sandbox_runner.run(
+                    SandboxRequest(
+                        skill_id="offline-review-network",
+                        command="python",
+                        args=["-c", "print('network check')"],
+                        requires_network=True,
+                    )
+                )
+                return ReviewVerdictDraft(
+                    status=ReviewStatus.fail,
+                    reason_code="SANDBOX_DENIED",
+                    notes=";".join(sandbox.policy_violations) or sandbox.stderr,
+                )
+
+            return ReviewVerdictDraft(status=ReviewStatus.pass_)
 
         # 1. Static Security Heuristics
         code = artifacts.generated_code.lower()
         if "os.system" in code or "subprocess.popen" in code:
-             return {"is_approved": False, "review_feedback": "Phát hiện lệnh thực thi hệ thống không an toàn (os.system/subprocess)."}
+            return ReviewVerdictDraft(
+                status=ReviewStatus.fail,
+                reason_code="VALIDATION_FAILED",
+                notes="Phat hien lenh thuc thi he thong khong an toan.",
+            )
 
         # 2. LLM Review (if client available)
         if self.llm_client:
@@ -41,10 +67,13 @@ class ReviewerAgent(BaseAgent):
                 )
                 import json
                 parsed = json.loads(str(res))
-                return {
-                    "is_approved": bool(parsed.get("is_approved", False)),
-                    "review_feedback": str(parsed.get("review_feedback", ""))
-                }
+                if bool(parsed.get("is_approved", False)):
+                    return ReviewVerdictDraft(status=ReviewStatus.pass_)
+                return ReviewVerdictDraft(
+                    status=ReviewStatus.warn,
+                    reason_code=str(parsed.get("reason_code") or "VALIDATION_FAILED"),
+                    notes=str(parsed.get("review_feedback") or ""),
+                )
             except Exception:
                 pass # Fallback to sandbox only
 
@@ -58,12 +87,13 @@ class ReviewerAgent(BaseAgent):
             )
         )
         if not result.success:
-            return {
-                "is_approved": False, 
-                "review_feedback": f"Sandbox error: {result.stderr}"
-            }
-            
-        return {"is_approved": True, "review_feedback": "Code looks good."}
+            return ReviewVerdictDraft(
+                status=ReviewStatus.fail,
+                reason_code="SANDBOX_DENIED",
+                notes=(";".join(result.policy_violations) or result.stderr),
+            )
+
+        return ReviewVerdictDraft(status=ReviewStatus.pass_)
 
     def act(self, context: AgentContext, inputs: Dict[str, object]) -> AgentResult:
         artifacts_data = inputs.get("artifacts")
@@ -84,5 +114,5 @@ class ReviewerAgent(BaseAgent):
             plan_json=str(inputs.get("plan_json", "")),
             iteration=int(inputs.get("iteration", 1))
         )
-        return AgentResult(success=True, payload={"verdict": verdict})
+        return AgentResult(success=True, payload={"verdict": verdict.model_dump(mode="json")})
 

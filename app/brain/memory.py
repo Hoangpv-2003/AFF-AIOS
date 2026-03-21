@@ -27,6 +27,11 @@ class MemoryQuery:
     top_k: int = 5
     embedding: Optional[List[float]] = None
     filters: Dict[str, Any] = field(default_factory=dict)
+    min_score: float = 0.0
+    deduplicate: bool = False
+    recency_boost: float = 0.0
+    embedding_weight: float = 0.8
+    lexical_weight: float = 0.2
 
 
 @dataclass
@@ -73,6 +78,12 @@ class InMemoryVectorStore:
             MemorySearchResult(record=record, score=self._score(record, query))
             for record in candidates
         ]
+        if query.min_score > 0.0:
+            scored = [item for item in scored if item.score >= query.min_score]
+
+        if query.deduplicate:
+            scored = self._deduplicate(scored)
+
         scored.sort(key=lambda item: item.score, reverse=True)
         return scored[: query.top_k]
 
@@ -96,9 +107,45 @@ class InMemoryVectorStore:
         if not filters:
             return True
         for key, expected in filters.items():
-            if record.metadata.get(key) != expected:
+            value = record.metadata.get(key)
+            if isinstance(expected, dict):
+                if "$in" in expected and value not in expected["$in"]:
+                    return False
+                if "$contains" in expected:
+                    needle = str(expected["$contains"]).lower()
+                    if needle not in str(value).lower():
+                        return False
+                if "$gte" in expected:
+                    try:
+                        if float(value) < float(expected["$gte"]):
+                            return False
+                    except Exception:
+                        return False
+                if "$lte" in expected:
+                    try:
+                        if float(value) > float(expected["$lte"]):
+                            return False
+                    except Exception:
+                        return False
+                continue
+            if value != expected:
                 return False
         return True
+
+    @staticmethod
+    def _deduplicate(items: List[MemorySearchResult]) -> List[MemorySearchResult]:
+        by_id: set[str] = set()
+        by_text: set[str] = set()
+        deduped: List[MemorySearchResult] = []
+        for item in items:
+            rid = item.record.id
+            text = " ".join(item.record.text.lower().split())
+            if rid in by_id or text in by_text:
+                continue
+            by_id.add(rid)
+            by_text.add(text)
+            deduped.append(item)
+        return deduped
 
     @staticmethod
     def _token_overlap(a: str, b: str) -> float:
@@ -120,6 +167,21 @@ class InMemoryVectorStore:
         return dot / (norm_a * norm_b)
 
     def _score(self, record: MemoryRecord, query: MemoryQuery) -> float:
+        semantic = 0.0
+        lexical = self._token_overlap(record.text, query.query_text)
         if query.embedding and record.embedding:
-            return self._cosine_similarity(record.embedding, query.embedding)
-        return self._token_overlap(record.text, query.query_text)
+            semantic = self._cosine_similarity(record.embedding, query.embedding)
+
+        if query.embedding and record.embedding:
+            base = (
+                float(query.embedding_weight) * semantic
+                + float(query.lexical_weight) * lexical
+            )
+        else:
+            base = lexical
+
+        if query.recency_boost > 0.0:
+            age = max(0.0, time.time() - float(record.created_at))
+            freshness = 1.0 / (1.0 + age / 3600.0)
+            base += float(query.recency_boost) * freshness
+        return base

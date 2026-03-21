@@ -156,7 +156,7 @@ def get_mongodb_store(
 
 
 def get_memory_manager(
-    rag_service: RAGService = Depends(get_rag_service),
+    rag_service: Any = Depends(get_rag_service),
     mongodb_store: Optional[MongoDBStore] = Depends(get_mongodb_store),
 ) -> MemoryManager:
     from app.brain.memory_manager import MemoryManager
@@ -176,7 +176,7 @@ def get_budget_enforcer(
 def get_planner_agent(
     budget_enforcer: BudgetEnforcer = Depends(get_budget_enforcer),
     llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
-    rag_service: RAGService = Depends(get_rag_service),
+    rag_service: Any = Depends(get_rag_service),
 ) -> PlannerAgent:
     return PlannerAgent(
         budget_enforcer=budget_enforcer,
@@ -188,7 +188,7 @@ def get_planner_agent(
 def get_coder_agent(
     budget_enforcer: BudgetEnforcer = Depends(get_budget_enforcer),
     llm_client: OllamaLLMClient = Depends(get_coder_llm_client),
-    rag_service: RAGService = Depends(get_rag_service),
+    rag_service: Any = Depends(get_rag_service),
 ) -> CoderAgent:
     return CoderAgent(
         budget_enforcer=budget_enforcer,

@@ -14,8 +14,18 @@ class ReviewStatus(str, Enum):
     fail = "fail"
 
 
+class SkillKind(str, Enum):
+    retrieve = "retrieve"
+    generate = "generate"
+    deliver = "deliver"
+    schedule = "schedule"
+    analyse = "analyse"
+    mutate = "mutate"
+
+
 class SkillSpec(BaseModel):
     skill_name: str
+    skill_kind: SkillKind = SkillKind.generate
     is_static: bool = False
     skill_purpose: str
     input_keys: list[str] = Field(default_factory=list)

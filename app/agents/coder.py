@@ -216,6 +216,25 @@ class CoderAgent(BaseAgent):
         if not isinstance(plan_data, dict):
             return AgentResult(success=False, reason_code="VALIDATION_FAILED")
 
+        if "task_summary" not in plan_data and "objective" in plan_data:
+            objective = str(plan_data.get("objective", "")).strip()
+            raw_steps = plan_data.get("steps")
+            if isinstance(raw_steps, list):
+                steps = [str(item).strip() for item in raw_steps if str(item).strip()]
+            else:
+                steps = []
+            plan_data = {
+                "task_summary": objective,
+                "confidence": float(plan_data.get("confidence", 0.5)),
+                "skills_to_create": [
+                    {
+                        "skill_name": str(plan_data.get("skill_name", "generated_skill")),
+                        "skill_purpose": objective or context.prompt,
+                        "coder_notes": "\n".join(steps) if steps else (objective or context.prompt),
+                    }
+                ],
+            }
+
         plan = PlanDraft(**plan_data)
         memory_context = ""
         if self.rag_service is not None:
@@ -256,6 +275,19 @@ class CoderAgent(BaseAgent):
             memory_context=memory_context,
             total_llm_calls=total_llm_calls,
         )
+
+        skill_name = str(inputs.get("skill_name", "generated_skill"))
+        rationale, rationale_llm_used = self._build_llm_rationale(
+            plan=plan,
+            skill_name=skill_name,
+            memory_context=memory_context,
+            runtime_context=str(runtime_context),
+            patch_mode=str(inputs.get("patch_mode", "create_new")),
+            fallback=artifacts.rationale,
+        )
+        artifacts.rationale = rationale
+        llm_used = llm_used or rationale_llm_used
+
         llm_debug = {}
         if (
             self.llm_client is not None

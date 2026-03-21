@@ -1,0 +1,14 @@
+dataDir: ao start https://github.com/Hoangpv-2003/AFF-AIOS/tree/test
+worktreeDir: test
+port: 8000
+defaults:
+  runtime: tmux
+  agent: claude-claudecode
+  workspace: worktree
+  notifiers:
+    - deskto
+projects:
+  AFF - AIOS:
+    repo: Hoangpv-2003/AFF-AIOS
+    path: D:\ZaloPC\AAF - AIOS
+    defaultBranch: MAIN
