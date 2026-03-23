@@ -26,6 +26,8 @@ class ScheduledJob:
     skill_name: str
     time_str: str          # "HH:MM" 24h
     parameters: Dict[str, Any]
+    recurrence: str = "daily"  # daily | monthly
+    day_of_month: Optional[int] = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     status: str = "active"
 
@@ -60,10 +62,24 @@ class JobScheduler:
         time_str: str,
         parameters: Optional[Dict[str, Any]] = None,
         job_id: Optional[str] = None,
+        recurrence: str = "daily",
+        day_of_month: Optional[int] = None,
     ) -> str:
         """Thêm job mới. Bỏ qua nếu job_id đã tồn tại (deduplication)."""
         if job_id is None:
-            job_id = f"{skill_name}-{time_str.replace(':', '')}"
+            suffix = time_str.replace(':', '')
+            if recurrence == "monthly":
+                day_suffix = day_of_month if day_of_month is not None else 1
+                suffix = f"m{day_suffix:02d}-{suffix}"
+            job_id = f"{skill_name}-{suffix}"
+
+        recurrence = (recurrence or "daily").strip().lower()
+        if recurrence not in {"daily", "monthly"}:
+            recurrence = "daily"
+        if recurrence == "monthly":
+            if day_of_month is None:
+                day_of_month = 1
+            day_of_month = max(1, min(28, int(day_of_month)))
 
         with self._lock:
             if job_id in self._jobs:
@@ -75,6 +91,8 @@ class JobScheduler:
                 skill_name=skill_name,
                 time_str=time_str,
                 parameters=parameters or {},
+                recurrence=recurrence,
+                day_of_month=day_of_month,
             )
             self._jobs[job_id] = job
             self._persist(job)
@@ -103,6 +121,8 @@ class JobScheduler:
                     "job_id": j.job_id,
                     "skill_name": j.skill_name,
                     "time_str": j.time_str,
+                    "recurrence": j.recurrence,
+                    "day_of_month": j.day_of_month,
                     "status": j.status,
                     "created_at": j.created_at,
                 }
@@ -133,6 +153,8 @@ class JobScheduler:
                         skill_name=doc["skill_name"],
                         time_str=doc["time_str"],
                         parameters=doc.get("parameters", {}),
+                        recurrence=str(doc.get("recurrence") or "daily"),
+                        day_of_month=doc.get("day_of_month"),
                         created_at=doc.get("created_at", datetime.utcnow().isoformat()),
                         status="active",
                     )
@@ -153,7 +175,12 @@ class JobScheduler:
             logger.info("Thread for job %s started.", job.job_id)
             while not stop_event.is_set():
                 now = datetime.now()
-                if now.strftime("%H:%M") == job.time_str:
+                should_run = now.strftime("%H:%M") == job.time_str
+                if should_run and job.recurrence == "monthly":
+                    target_day = job.day_of_month or 1
+                    should_run = now.day == target_day
+
+                if should_run:
                     try:
                         self._run_skill(job.skill_name, job.parameters)
                     except Exception as exc:
@@ -205,6 +232,8 @@ class JobScheduler:
                     "skill_name": job.skill_name,
                     "time_str": job.time_str,
                     "parameters": job.parameters,
+                    "recurrence": job.recurrence,
+                    "day_of_month": job.day_of_month,
                     "created_at": job.created_at,
                     "status": "active",
                 }},

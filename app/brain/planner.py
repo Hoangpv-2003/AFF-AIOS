@@ -29,19 +29,12 @@ class PlannerAgent(BaseAgent):
         self.rag_service = rag_service
 
     def create_plan(self, task_input: str) -> PlanDraft:
-        """Fallback: create a single SkillSpec for the whole task."""
+        """Deprecated strict mode entrypoint.
+
+        Planner no longer emits hardcoded fallback skills.
+        """
         validate_non_empty(task_input, "task_input")
-        return PlanDraft(
-            task_summary=task_input.strip(),
-            skills_to_create=[
-                SkillSpec(
-                    skill_name="fallback_skill",
-                    skill_purpose=task_input.strip(),
-                    coder_notes=f"Implement: {task_input.strip()}",
-                )
-            ],
-            confidence=0.5,
-        )
+        raise RuntimeError("Planner strict mode: create_plan fallback is disabled")
 
     def _create_plan_with_llm(
         self,
@@ -52,7 +45,7 @@ class PlannerAgent(BaseAgent):
         planning_mode: str = "standard",
     ) -> Tuple[PlanDraft, bool, str, Dict[str, Any]]:
         if self.llm_client is None or not hasattr(self.llm_client, "generate"):
-            return self.create_plan(intent_json), False, "", {}
+            raise RuntimeError("Planner LLM is not configured")
 
         messages = build_planner_messages(
             intent_json=intent_json,
@@ -71,8 +64,8 @@ class PlannerAgent(BaseAgent):
                     system_prompt=system_prompt,
                 )
             ).strip()
-        except Exception:
-            return self.create_plan(intent_json), False, "", {}
+        except Exception as exc:
+            raise RuntimeError(f"Planner LLM generation failed: {exc}") from exc
 
         skills: List[SkillSpec] = []
         confidence = 0.85
@@ -87,8 +80,16 @@ class PlannerAgent(BaseAgent):
             raw_skills = parsed.get("skills_to_create") or []
             for item in raw_skills:
                 if isinstance(item, dict) and "skill_name" in item:
+                    if "acceptance_checks" in item and not isinstance(item.get("acceptance_checks"), list):
+                        item["acceptance_checks"] = []
                     spec = SkillSpec(**item)
                     spec.skill_kind = self._normalize_skill_kind(item, spec)
+                    if not spec.input_keys:
+                        spec.input_keys = self._default_input_keys(spec.skill_kind)
+                    if not spec.output_keys:
+                        spec.output_keys = self._default_output_keys(spec.skill_kind)
+                    if not spec.coder_notes.strip():
+                        spec.coder_notes = self._default_coder_notes(spec)
                     skills.append(spec)
             confidence = float(parsed.get("confidence", 0.85))
 
@@ -103,19 +104,11 @@ class PlannerAgent(BaseAgent):
             ):
                 if key in parsed:
                     extended_fields[key] = parsed.get(key)
-        except Exception:
-            # Fallback parsing if JSON was malformed but partially usable
-            task_summary = intent_json[:100]
-            skills = [
-                SkillSpec(
-                    skill_name="custom_skill",
-                    skill_purpose=intent_json,
-                    coder_notes=response
-                )
-            ]
+        except Exception as exc:
+            raise ValueError(f"Planner returned invalid JSON: {exc}") from exc
 
-        if not skills and not parsed_ok:
-            return self.create_plan(intent_json), False, response, {}
+        if not skills or not parsed_ok:
+            raise ValueError("Planner returned no valid skills")
 
         plan = PlanDraft(
             task_summary=task_summary or intent_json,
@@ -141,7 +134,9 @@ class PlannerAgent(BaseAgent):
 
     @staticmethod
     def _normalize_skill_kind(raw_item: Dict[str, Any], skill: SkillSpec) -> SkillKind:
-        kind_raw = str(raw_item.get("skill_kind") or skill.skill_kind.value).strip().lower()
+        kind_raw = str(
+            raw_item.get("skill_kind") or skill.skill_kind.value
+        ).strip().lower()
         if kind_raw in {kind.value for kind in SkillKind}:
             return SkillKind(kind_raw)
 
@@ -185,6 +180,61 @@ class PlannerAgent(BaseAgent):
                 allowed.add(SkillKind.schedule)
 
         return allowed
+
+    @staticmethod
+    def _default_input_keys(kind: SkillKind) -> List[str]:
+        if kind == SkillKind.retrieve:
+            return ["topic"]
+        if kind == SkillKind.deliver:
+            return ["recipient", "report"]
+        if kind == SkillKind.schedule:
+            return ["schedule_time", "message"]
+        if kind == SkillKind.analyse:
+            return ["results"]
+        return ["results"]
+
+    @staticmethod
+    def _default_output_keys(kind: SkillKind) -> List[str]:
+        if kind == SkillKind.retrieve:
+            return ["results", "source_urls"]
+        if kind == SkillKind.deliver:
+            return ["email"]
+        if kind == SkillKind.schedule:
+            return ["job_id", "scheduled_for"]
+        if kind == SkillKind.analyse:
+            return ["report", "chart_data"]
+        return ["status", "summary"]
+
+    @staticmethod
+    def _default_coder_notes(spec: SkillSpec) -> str:
+        if spec.skill_kind == SkillKind.retrieve:
+            return "Use grounded search and return source_urls with raw results."
+        if spec.skill_kind == SkillKind.deliver:
+            return "Send to recipient only after required input payload is complete."
+        if spec.skill_kind == SkillKind.schedule:
+            return "Persist recurrence and next-run metadata."
+        if spec.skill_kind == SkillKind.analyse:
+            return "Extract metrics from input evidence and include units."
+        return "Implement minimal deterministic logic for requested purpose."
+
+    @staticmethod
+    def _build_execution_contract(skills: List[SkillSpec]) -> Dict[str, Any]:
+        ordered = [s.skill_name for s in skills]
+        handoff_rules: List[Dict[str, Any]] = []
+        for i, left in enumerate(skills):
+            for right in skills[i + 1 :]:
+                required = sorted(set(left.output_keys) & set(right.input_keys))
+                if not required:
+                    continue
+                handoff_rules.append(
+                    {
+                        "from_skill": left.skill_name,
+                        "to_skill": right.skill_name,
+                        "required_outputs": required,
+                        "reason": "downstream input dependency",
+                    }
+                )
+        return {"ordered_skills": ordered, "handoff_rules": handoff_rules}
 
     def _enforce_intent_alignment(self, plan: PlanDraft, intent_json: Any) -> PlanDraft:
         intent = self._extract_intent_object(intent_json)
@@ -244,13 +294,20 @@ class PlannerAgent(BaseAgent):
         if planning_mode not in {"standard", "tot", "multi_persona"}:
             planning_mode = "standard"
 
-        plan, llm_used, llm_output, extended_fields = self._create_plan_with_llm(
-            str(intent_json),
-            runtime_context=runtime_context,
-            memory_context=memory_context,
-            validator_feedback=inputs.get("validator_feedback", ""),
-            planning_mode=planning_mode,
-        )
+        try:
+            plan, llm_used, llm_output, extended_fields = self._create_plan_with_llm(
+                str(intent_json),
+                runtime_context=runtime_context,
+                memory_context=memory_context,
+                validator_feedback=inputs.get("validator_feedback", ""),
+                planning_mode=planning_mode,
+            )
+        except Exception as exc:
+            return AgentResult(
+                success=False,
+                reason_code="planner_generation_failed",
+                payload={"error": str(exc)},
+            )
         plan = self._enforce_intent_alignment(plan, intent_json)
         
         llm_debug = {}
@@ -299,6 +356,7 @@ class PlannerAgent(BaseAgent):
         plan_payload["planning_mode"] = planning_mode
         for key, value in extended_fields.items():
             plan_payload[key] = value
+        plan_payload["execution_contract"] = self._build_execution_contract(plan.skills_to_create)
             
         return AgentResult(
             success=True,

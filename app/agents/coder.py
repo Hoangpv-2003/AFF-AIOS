@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import ast
 from app.agents.base_agent import AgentContext, AgentResult, BaseAgent
 from app.agents.reviewer import ReviewerAgent
 from app.brain.prompt_templates import (
-    build_coder_messages, 
-    build_runtime_context, 
-    build_coder_review_messages,
-    CODE_GENERATION_TPL
+    build_coder_messages,
+    build_runtime_context,
 )
 from app.brain.rag import RAGService
 from app.infrastructure.budget.enforcer import BudgetEnforcer
@@ -44,6 +41,7 @@ class CoderAgent(BaseAgent):
         runtime_context: str = "",
         patch_mode: str = "create_new",
         fallback: str = "",
+        skill_contract_json: str = "{}",
     ) -> Tuple[str, bool]:
         if self.llm_client is None or not hasattr(self.llm_client, "generate"):
             return fallback, False
@@ -54,6 +52,7 @@ class CoderAgent(BaseAgent):
             memory_context=memory_context,
             runtime_context=runtime_context,
             patch_mode=patch_mode,
+            skill_contract_json=skill_contract_json,
         )
         system_prompt = messages[0]["content"]
         prompt = messages[1]["content"]
@@ -96,7 +95,10 @@ class CoderAgent(BaseAgent):
             f"skills/dynamic/{slug}.py",
             f"tests/generated/test_{slug}.py",
         ]
-        
+
+        selected_skill_contract = self._select_skill_contract(plan, skill_name)
+        skill_contract_json = json.dumps(selected_skill_contract, ensure_ascii=False)
+
         # 1. First Generation
         coder_messages = build_coder_messages(
             plan_json=plan.model_dump_json(),
@@ -104,108 +106,203 @@ class CoderAgent(BaseAgent):
             memory_context=memory_context,
             runtime_context=runtime_context,
             patch_mode=patch_mode,
+            skill_contract_json=skill_contract_json,
         )
-        coder_prompt = f"{coder_messages[0]['content']}\n\n{coder_messages[1]['content']}"
-        
+        coder_prompt = (
+            f"{coder_messages[0]['content']}\n\n"
+            f"{coder_messages[1]['content']}"
+        )
+
         # Global ceiling check
         if total_llm_calls >= 15:
-             return CoderArtifactDraft(files=[], rationale="GLOBAL_CEILING_REACHED"), False, total_llm_calls
+            return (
+                CoderArtifactDraft(
+                    files=[],
+                    rationale="GLOBAL_CEILING_REACHED",
+                ),
+                False,
+                total_llm_calls,
+            )
 
         code_text = ""
         iteration = 1
         MAX_ITERATIONS = 3
-        
+
         while iteration <= MAX_ITERATIONS:
             try:
                 # Use current local LLM generation logic
-                raw_response = str(self.llm_client.generate(prompt=coder_prompt)).strip()
+                raw_response = str(
+                    self.llm_client.generate(prompt=coder_prompt)
+                ).strip()
                 total_llm_calls += 1
-                
+
                 # Robust extraction
                 code_text = raw_response
-                
+
                 # Try to find a JSON block first if it exists
                 if "```json" in code_text:
-                    json_str = code_text.split("```json")[1].split("```")[0].strip()
+                    json_str = (
+                        code_text.split("```json")[1]
+                        .split("```")[0]
+                        .strip()
+                    )
                     try:
                         data = json.loads(json_str)
-                        for key in ["code", "generated_code", "python_code", "content"]:
+                        for key in [
+                            "code",
+                            "generated_code",
+                            "python_code",
+                            "content",
+                        ]:
                             if isinstance(data, dict) and key in data:
                                 code_text = data[key]
                                 break
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         pass
 
                 # Then handle Markdown fences for Python
                 if "```python" in code_text:
-                    code_text = code_text.split("```python")[1].split("```")[0].strip()
+                    code_text = (
+                        code_text.split("```python")[1]
+                        .split("```")[0]
+                        .strip()
+                    )
                 elif "```" in code_text:
                     # Only split if it looks like it's wrapping something
                     parts = code_text.split("```")
                     if len(parts) >= 3:
                         code_text = parts[1].strip()
-                
+
                 # Final check if the whole thing is JSON braces
-                if not code_text.startswith("import") and not code_text.startswith("from") and code_text.strip().startswith("{") and code_text.strip().endswith("}"):
+                if (
+                    not code_text.startswith("import")
+                    and not code_text.startswith("from")
+                    and code_text.strip().startswith("{")
+                    and code_text.strip().endswith("}")
+                ):
                     try:
                         data = json.loads(code_text)
-                        for key in ["code", "generated_code", "python_code", "content"]:
+                        for key in [
+                            "code",
+                            "generated_code",
+                            "python_code",
+                            "content",
+                        ]:
                             if isinstance(data, dict) and key in data:
                                 code_text = data[key]
                                 break
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         pass
-                
+
             except Exception:
                 break
-                
+
             # Lớp bảo vệ 1: Static Analysis (ast.parse)
             try:
                 tree = ast.parse(code_text)
                 # Check for 'run' function
                 run_def = None
                 for node in ast.walk(tree):
-                    if (isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef)) and node.name == "run":
+                    if (
+                        isinstance(node, ast.FunctionDef)
+                        or isinstance(node, ast.AsyncFunctionDef)
+                    ) and node.name == "run":
                         run_def = node
                         break
-                        
+
                 if not run_def:
-                    raise ValueError("MANDATORY 'def run(input_data=None, **kwargs)' function is missing or misnamed.")
-                
+                    raise ValueError(
+                        "MANDATORY 'def run(input_data=None, **kwargs)' "
+                        "function is missing or misnamed."
+                    )
+
                 if isinstance(run_def, ast.AsyncFunctionDef):
-                    raise ValueError("Skill function MUST be synchronous. 'async def' is forbidden.")
-                
+                    raise ValueError(
+                        "Skill function MUST be synchronous. "
+                        "'async def' is forbidden."
+                    )
+
                 # Check for **kwargs
-                has_kwargs = any(isinstance(arg, ast.arg) and arg.arg == "kwargs" for arg in run_def.args.args) or run_def.args.kwarg is not None
+                has_kwargs = (
+                    any(
+                        isinstance(arg, ast.arg) and arg.arg == "kwargs"
+                        for arg in run_def.args.args
+                    )
+                    or run_def.args.kwarg is not None
+                )
                 if not has_kwargs:
-                    raise ValueError("MANDATORY 'run' function must accept '**kwargs' for future-proofing.")
-                    
+                    raise ValueError(
+                        "MANDATORY 'run' function must accept '**kwargs' "
+                        "for future-proofing."
+                    )
+
             except (SyntaxError, ValueError) as e:
-                coder_prompt += f"\n\n## Syntax or Contract Error (Iteration {iteration})\n{str(e)}\n\nLàm ơn sửa lại code. Phải có hàm 'def run(input_data=None, **kwargs)' đồng bộ (synchronous)."
+                coder_prompt += (
+                    f"\n\n## Syntax or Contract Error "
+                    f"(Iteration {iteration})\n"
+                    f"{str(e)}\n\n"
+                    "Làm ơn sửa lại code. Phải có hàm "
+                    "'def run(input_data=None, **kwargs)' đồng bộ "
+                    "(synchronous)."
+                )
                 iteration += 1
                 continue
 
             # Lớp bảo vệ 2: Code Reviewer Agent
             res_review = self.reviewer.act(
-                AgentContext(task_id="review", trace_id=context.trace_id, prompt=skill_name),
+                AgentContext(
+                    task_id="review",
+                    trace_id=context.trace_id,
+                    prompt=skill_name,
+                ),
                 {
                     "plan_json": plan.model_dump_json(),
                     "code_text": code_text,
-                    "iteration": iteration
-                }
+                    "iteration": iteration,
+                },
             )
             total_llm_calls += 1
-            
+
             review = res_review.payload.get("verdict", {})
             if review.get("is_approved"):
                 break
-            
+
             # Recursive feedback
             coder_prompt += f"\n\n## Feedback từ Reviewer (Vòng {iteration})\n"
             coder_prompt += f"{review.get('review_feedback')}\n"
             iteration += 1
 
-        return CoderArtifactDraft(files=files, rationale=f"Approved on round {iteration}", generated_code=code_text), True, total_llm_calls
+        return (
+            CoderArtifactDraft(
+                files=files,
+                rationale=f"Approved on round {iteration}",
+                generated_code=code_text,
+            ),
+            True,
+            total_llm_calls,
+        )
+
+    @staticmethod
+    def _select_skill_contract(plan: PlanDraft, skill_name: str) -> Dict[str, Any]:
+        for spec in plan.skills_to_create:
+            if spec.skill_name != skill_name:
+                continue
+            return {
+                "skill_name": spec.skill_name,
+                "skill_kind": spec.skill_kind.value,
+                "skill_purpose": spec.skill_purpose,
+                "input_keys": list(spec.input_keys),
+                "output_keys": list(spec.output_keys),
+                "coder_notes": spec.coder_notes,
+            }
+        return {
+            "skill_name": skill_name,
+            "skill_kind": "generate",
+            "skill_purpose": plan.task_summary,
+            "input_keys": [],
+            "output_keys": [],
+            "coder_notes": "",
+        }
 
     def act(
         self,
@@ -220,7 +317,11 @@ class CoderAgent(BaseAgent):
             objective = str(plan_data.get("objective", "")).strip()
             raw_steps = plan_data.get("steps")
             if isinstance(raw_steps, list):
-                steps = [str(item).strip() for item in raw_steps if str(item).strip()]
+                steps = [
+                    str(item).strip()
+                    for item in raw_steps
+                    if str(item).strip()
+                ]
             else:
                 steps = []
             plan_data = {
@@ -228,9 +329,15 @@ class CoderAgent(BaseAgent):
                 "confidence": float(plan_data.get("confidence", 0.5)),
                 "skills_to_create": [
                     {
-                        "skill_name": str(plan_data.get("skill_name", "generated_skill")),
+                        "skill_name": str(
+                            plan_data.get("skill_name", "generated_skill")
+                        ),
                         "skill_purpose": objective or context.prompt,
-                        "coder_notes": "\n".join(steps) if steps else (objective or context.prompt),
+                        "coder_notes": (
+                            "\n".join(steps)
+                            if steps
+                            else (objective or context.prompt)
+                        ),
                     }
                 ],
             }
@@ -261,7 +368,9 @@ class CoderAgent(BaseAgent):
 
         runtime_context = inputs.get("runtime_context", "")
         if not runtime_context:
-            runtime_context = build_runtime_context(history=inputs.get("history", []))
+            runtime_context = build_runtime_context(
+                history=inputs.get("history", [])
+            )
 
         total_llm_calls = int(inputs.get("total_llm_calls", 0))
 
@@ -284,6 +393,10 @@ class CoderAgent(BaseAgent):
             runtime_context=str(runtime_context),
             patch_mode=str(inputs.get("patch_mode", "create_new")),
             fallback=artifacts.rationale,
+            skill_contract_json=json.dumps(
+                self._select_skill_contract(plan, skill_name),
+                ensure_ascii=False,
+            ),
         )
         artifacts.rationale = rationale
         llm_used = llm_used or rationale_llm_used

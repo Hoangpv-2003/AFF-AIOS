@@ -57,7 +57,7 @@ async def escalate_approval(approval_id: str):
     if approval_id not in _APPROVALS:
         raise HTTPException(status_code=404, detail="Approval not found")
     _APPROVALS[approval_id]["status"] = ApprovalStatus.escalated
-    _APPROVALS[approval_id]["escalated_to"] = "fallback_reviewer"
+    _APPROVALS[approval_id]["escalated_to"] = "manual_reviewer_queue"
     return _APPROVALS[approval_id]
 
 

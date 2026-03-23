@@ -4,20 +4,11 @@ import json
 import uuid
 import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import io
 import httpx
 from dotenv import load_dotenv
-load_dotenv()
-# Cấu hình UTF-8 cho console Windows
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-# Thêm root vào path để import app
-sys.path.append(os.getcwd())
-
 from app.core.config import get_settings
 from app.api.dependencies import get_rag_service
 from app.infrastructure.external_apis.ollama_client import OllamaLLMClient
@@ -32,6 +23,14 @@ from app.agents.manager import ManagerAgent
 from app.agents.base_agent import AgentContext
 from app.brain.prompt_templates import build_runtime_context
 from app.api.v1.endpoints.agents import _execute_skill
+load_dotenv()
+# Cấu hình UTF-8 cho console Windows
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+# Thêm root vào path để import app
+sys.path.append(os.getcwd())
 
 # ANSI Colors
 BLUE = "\033[94m"
@@ -40,6 +39,7 @@ YELLOW = "\033[93m"
 RED = "\033[91m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+
 
 class LoggingLLMClient(OllamaLLMClient):
     def __init__(self, *args, **kwargs):
@@ -50,6 +50,7 @@ class LoggingLLMClient(OllamaLLMClient):
         res = super().generate(prompt, **kwargs)
         self.last_raw = res
         return res
+
 
 def print_log(title: str, input_data: str, output_data: str, color=BLUE):
     print(f"\n{BOLD}{color}>>> STEP: {title}{RESET}", flush=True)
@@ -77,7 +78,14 @@ def _direct_tavily_fetch(topic: str) -> Dict[str, Any]:
             "error_reason": "missing_tavily_api_key",
             "results": [],
         }
-    query = topic.strip() or "thong ke doanh thu"
+    query = topic.strip()
+    if not query:
+        return {
+            "status": "error",
+            "summary": "Thiếu chủ đề truy vấn.",
+            "error_reason": "missing_topic",
+            "results": [],
+        }
     try:
         response = httpx.post(
             "https://api.tavily.com/search",
@@ -124,10 +132,8 @@ def _summarize_results_with_llm(
         if isinstance(parsed, dict) and parsed.get("reply"):
             return str(parsed.get("reply"))
         return raw
-    except Exception:
-        if str(api_output.get("status", "")).lower() == "success":
-            return "Đã lấy dữ liệu doanh thu và tổng hợp sơ bộ từ nguồn realtime."
-        return "Không thể tổng hợp do lỗi khi lấy dữ liệu realtime."
+    except Exception as exc:
+        return f"Không thể tổng hợp do lỗi LLM: {exc}"
 
 
 def _wants_previous_report_context(user_text: str, intent_data: Dict[str, Any]) -> bool:
@@ -190,28 +196,68 @@ def _skill_name_tokens(skill_name: str) -> set[str]:
     return _tokenize_skill_text(skill_name.replace("-", " ").replace("_", " "))
 
 
+def _python_file_is_valid(file_path: Path) -> bool:
+    try:
+        source = file_path.read_text(encoding="utf-8")
+        compile(source, str(file_path), "exec")
+        return True
+    except Exception:
+        return False
+
+
+def _python_code_is_valid(code: str) -> bool:
+    try:
+        compile(code, "<generated-skill>", "exec")
+        return True
+    except Exception:
+        return False
+
+
+def _build_skill_token_map(
+    root: Path,
+    available_static: list[str],
+    available_dynamic: list[str],
+) -> Dict[str, set[str]]:
+    token_map: Dict[str, set[str]] = {}
+    for name in list(available_static) + list(available_dynamic):
+        base_tokens = _skill_name_tokens(name)
+        source_tokens: set[str] = set()
+        for folder in ["static", "dynamic"]:
+            path = root / "app" / "skills" / folder / f"{name}.py"
+            if path.exists() and _python_file_is_valid(path):
+                try:
+                    snippet = path.read_text(encoding="utf-8")[:5000]
+                    source_tokens |= _tokenize_skill_text(snippet)
+                except Exception:
+                    pass
+        token_map[name] = base_tokens | source_tokens
+    return token_map
+
+
 def _similarity_score(spec_tokens: set[str], cand_tokens: set[str]) -> float:
     if not spec_tokens or not cand_tokens:
         return 0.0
     inter = len(spec_tokens & cand_tokens)
     union = len(spec_tokens | cand_tokens)
-    if union == 0:
-        return 0.0
-    return inter / union
+    jaccard = (inter / union) if union else 0.0
+    coverage = inter / max(1, len(spec_tokens))
+    return max(jaccard, coverage)
 
 
 def _auto_reuse_existing_skills(
     plan_data: Dict[str, Any],
+    root: Path,
     available_static: list[str],
     available_dynamic: list[str],
+    threshold: float,
 ) -> Dict[str, Any]:
     skills = plan_data.get("skills_to_create") or []
     if not isinstance(skills, list):
         return plan_data
 
     available = list(available_static) + list(available_dynamic)
+    token_map = _build_skill_token_map(root, available_static, available_dynamic)
     rewritten: list[Dict[str, Any]] = []
-    reused_names: set[str] = set()
 
     for raw in skills:
         if not isinstance(raw, dict):
@@ -226,7 +272,7 @@ def _auto_reuse_existing_skills(
         best_score = 0.0
 
         for cand in available:
-            cand_tokens = _skill_name_tokens(cand)
+            cand_tokens = token_map.get(cand, _skill_name_tokens(cand))
             score = _similarity_score(spec_tokens, cand_tokens)
 
             # Prefer static reusable blocks when score is tied.
@@ -239,12 +285,11 @@ def _auto_reuse_existing_skills(
                 best_name = cand
 
         # Auto-reuse threshold keeps behavior generic but safe.
-        if best_name and best_score >= 0.34:
+        if best_name and best_score >= threshold:
             item = dict(raw)
             item["skill_name"] = best_name
             item["is_static"] = best_name in available_static
             rewritten.append(item)
-            reused_names.add(best_name)
         else:
             rewritten.append(dict(raw))
 
@@ -387,7 +432,13 @@ def main():
             if isinstance(plan_data, dict):
                 static_skills = [f.stem for f in (root / "app" / "skills" / "static").glob("*.py")] if (root / "app" / "skills" / "static").exists() else []
                 dynamic_skills = [f.stem for f in (root / "app" / "skills" / "dynamic").glob("*.py")] if (root / "app" / "skills" / "dynamic").exists() else []
-                plan_data = _auto_reuse_existing_skills(plan_data, static_skills, dynamic_skills)
+                plan_data = _auto_reuse_existing_skills(
+                    plan_data,
+                    root,
+                    static_skills,
+                    dynamic_skills,
+                    threshold=float(settings.cli_skill_reuse_score_threshold),
+                )
             expected_goal = str(plan_data.get("task_summary") or user_input)
             print_log("Planner", f"Intent: {intent_data.get('action_type')}", json.dumps(plan_data, indent=2, ensure_ascii=False))
 
@@ -448,10 +499,13 @@ def main():
                 # If router asks to build a skill that already exists, reuse it directly.
                 build_after_reuse: list[str] = []
                 for name in skills_to_build_names:
-                    exists = any(
-                        (root / "app" / "skills" / folder / f"{name}.py").exists()
-                        for folder in ["static", "dynamic"]
-                    )
+                    existing_path: Optional[Path] = None
+                    for folder in ["static", "dynamic"]:
+                        candidate = root / "app" / "skills" / folder / f"{name}.py"
+                        if candidate.exists():
+                            existing_path = candidate
+                            break
+                    exists = existing_path is not None and _python_file_is_valid(existing_path)
                     if exists:
                         if name not in skills_to_use:
                             skills_to_use.append(name)
@@ -464,7 +518,8 @@ def main():
                 for s_name in skills_to_use:
                     exists = False
                     for folder in ["static", "dynamic"]:
-                        if (root / "app" / "skills" / folder / f"{s_name}.py").exists():
+                        candidate = root / "app" / "skills" / folder / f"{s_name}.py"
+                        if candidate.exists() and _python_file_is_valid(candidate):
                             exists = True
                             break
                     if exists:
@@ -514,6 +569,16 @@ def main():
                         print(f"{RED}[ERROR]{RESET} Coder failed for '{name}': {exc}", flush=True)
 
                     if code_text:
+                        if not _python_code_is_valid(code_text):
+                            coding_errors.append(f"Generated invalid Python for skill {name}")
+                            print(f"{RED}[ERROR]{RESET} Generated code for '{name}' is invalid Python. Skipping save.", flush=True)
+                            print_log(
+                                f"Coder (Skill: {name})",
+                                f"Objective: {plan_data.get('task_summary')}",
+                                "Generated code failed syntax validation and was skipped.",
+                            )
+                            continue
+
                         is_static = skill_spec.get("is_static", False)
                         folder = "static" if is_static else "dynamic"
                         save_path = root / "app" / "skills" / folder / f"{name}.py"
@@ -538,6 +603,18 @@ def main():
                 exec_summaries = []
                 execution_outputs = []
                 if executed_skills:
+                    ordered_by_plan: list[str] = []
+                    for spec in plan_data.get("skills_to_create", []):
+                        if not isinstance(spec, dict):
+                            continue
+                        s_name = str(spec.get("skill_name", "")).strip()
+                        if s_name and s_name in executed_skills and s_name not in ordered_by_plan:
+                            ordered_by_plan.append(s_name)
+                    for s_name in executed_skills:
+                        if s_name not in ordered_by_plan:
+                            ordered_by_plan.append(s_name)
+                    executed_skills = ordered_by_plan
+
                     accumulated_data = dict(intent_data.get("entities", {}))
                     if use_previous_context and previous_delivery_context:
                         for k, v in previous_delivery_context.items():
@@ -572,7 +649,7 @@ def main():
 
                     exec_summary = " | ".join(exec_summaries)
                 else:
-                    exec_summary = " | ".join(coding_errors) if coding_errors else "No specific skills were executed."
+                    exec_summary = " | ".join(coding_errors) if coding_errors else "Execution halted: no runnable skills selected."
                     execution_outputs = []
 
         # 7. Result review gate before responding to user
@@ -649,14 +726,8 @@ def main():
                 reply = str(parsed_reply.get("reply", "")).strip()
             if not reply:
                 reply = raw_reply
-        except Exception:
-            if "error" in exec_summary.lower() or "validation" in exec_summary.lower():
-                reply = (
-                    "Đã xử lý một phần yêu cầu nhưng còn lỗi trong quá trình thực thi. "
-                    "Vui lòng kiểm tra lại dữ liệu đầu vào hoặc thử lại để lấy kết quả đầy đủ."
-                )
-            else:
-                reply = f"Đã xử lý xong yêu cầu. Tóm tắt kết quả: {exec_summary}"
+        except Exception as exc:
+            reply = f"Không thể tổng hợp phản hồi do lỗi LLM: {exc}. Kết quả thực thi: {exec_summary}"
 
         # Normalize accidental JSON-as-text replies.
         if reply.startswith("{") and reply.endswith("}"):

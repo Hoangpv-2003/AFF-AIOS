@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_email: str = ""
     smtp_use_tls: bool = True
+    allow_smtp_fallback: bool = False
 
     calendar_provider: str = "local"
     google_calendar_access_token: str = ""
@@ -85,8 +86,11 @@ class Settings(BaseSettings):
     ollama_agent_model: str = "llama3.1:8b"
     ollama_coder_model: str = "qwen3:8b"
     ollama_reviewer_model: str = "llama3.1:8b"
-    ollama_fallback_models: str = "llama3.1:8b,qwen3:0.5b"
+    ollama_fallback_models: str = ""
     ollama_embedding_model: str = "bge-m3:latest"
+
+    existing_skill_reuse_score_threshold: float = 0.70
+    cli_skill_reuse_score_threshold: float = 0.55
 
     sandbox_offline_mode: bool = True
     interactive_queue_p95_ms_target: int = 500

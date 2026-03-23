@@ -1,34 +1,45 @@
-from __future__ import annotations
-import os
-import httpx
-import json
-from typing import Any, Dict, Optional
-
-def run(input_data: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
-    topic = input_data.get("topic")
-    results = input_data.get("results")
-    summary_text = input_data.get("summary_text")
+def run(input_data=None, **kwargs):
+    input_data = input_data or {}
+    if "results" not in input_data:
+        return {
+            "status": "error",
+            "summary": "Không có dữ liệu kết quả để tạo báo cáo.",
+            "error_reason": "Thiếu khóa 'results' trong input_data"
+        }
     
-    # Check for RUNTIME_CONTEXT and extract current date
-    current_datetime = os.environ.get("RUNTIME_CONTEXT", {}).get("current_datetime")
-    if not current_datetime:
-        return {"status": "error", "summary": "Không thể xác định thời gian hiện tại."}
+    results = input_data["results"]
+    report = []
+    total_revenue = 0
     
-    report_date = current_datetime.split("T")[0]  # Extract date part
+    for result in results:
+        if "month" not in result or "revenue" not in result:
+            continue
+            
+        try:
+            month = result["month"]
+            revenue = float(result["revenue"])
+            report.append({
+                "month": month,
+                "revenue": revenue,
+                "currency": "VND"
+            })
+            total_revenue += revenue
+        except (KeyError, ValueError, TypeError) as e:
+            return {
+                "status": "error",
+                "summary": f"Không thể xử lý dữ liệu kết quả: {str(e)}",
+                "error_reason": "Dữ liệu không hợp lệ trong 'results'"
+            }
     
-    # Define the report template
-    template = """
-**Báo cáo doanh thu Viettel năm 2025**
-Ngày báo cáo: {report_date}
-
-## Tổng quan
-{summary_text}
-
-## Kết luận
-Báo cáo này tổng hợp các thông tin về doanh thu của Viettel năm 2025 dựa trên dữ liệu tìm kiếm.
-"""
+    if not report:
+        return {
+            "status": "error",
+            "summary": "Không tìm thấy dữ liệu doanh thu hợp lệ.",
+            "error_reason": "Tất cả kết quả đều không chứa thông tin doanh thu"
+        }
     
-    # Format the report with dynamic content
-    report = template.format(report_date=report_date, summary_text=summary_text)
-    
-    return {"status": "success", "report": report}
+    return {
+        "status": "success",
+        "summary": f"Báo cáo doanh thu hàng tháng đã được tạo. Tổng doanh thu: {total_revenue} VND",
+        "report": report
+    }

@@ -11,7 +11,7 @@ from app.agents.reviewer import ReviewerAgent
 from app.brain.planner import PlannerAgent
 from app.core.constants import ADMISSION_DEPTH_THRESHOLDS
 from app.core.constants import ADMISSION_REASON_CODES
-from app.core.constants import QUEUE_CLASSES, SLA_TARGET_MS
+from app.core.constants import QUEUE_CLASSES
 from app.infrastructure.queue.redis_rq_client import RedisRQQueueClient
 
 
@@ -44,7 +44,7 @@ class ManagerAgent:
 
     def __init__(
         self,
-        intent_parser: Optional[Any] = None, # Placeholder for new agents
+        intent_parser: Optional[Any] = None,  # Placeholder for new agents
         planner: Optional[PlannerAgent] = None,
         router: Optional[Any] = None,
         coder: Optional[CoderAgent] = None,
@@ -193,10 +193,16 @@ class ManagerAgent:
                     metadata=context_data or {},
                 )
                 review_inputs = {
-                    "code_text": "def run(input_data=None, **kwargs):\n    return {'status': 'success'}\n",
+                    "code_text": (
+                        "def run(input_data=None, **kwargs):\n"
+                        "    return {'status': 'success'}\n"
+                    ),
                     "iteration": warn_retries_used + 1,
                 }
-                review_result = self.reviewer.act(review_context, review_inputs)
+                review_result = self.reviewer.act(
+                    review_context,
+                    review_inputs,
+                )
 
                 if not review_result.success:
                     move("REVIEWED_WARN")
@@ -204,8 +210,10 @@ class ManagerAgent:
                     move("WAITING_APPROVAL")
                     break
 
-                review_status, review_reason = self._normalize_reviewer_outcome(
-                    review_result.payload or {}
+                review_status, review_reason = (
+                    self._normalize_reviewer_outcome(
+                        review_result.payload or {}
+                    )
                 )
                 if review_status == "pass":
                     move("REVIEWED_PASS")
@@ -219,7 +227,10 @@ class ManagerAgent:
 
                 move("REVIEWED_WARN")
                 reason_code = review_reason or "VALIDATION_FAILED"
-                if self.retry_on_warn and warn_retries_used < self.max_warn_retries:
+                if (
+                    self.retry_on_warn
+                    and warn_retries_used < self.max_warn_retries
+                ):
                     warn_retries_used += 1
                     execution_log.append(
                         {

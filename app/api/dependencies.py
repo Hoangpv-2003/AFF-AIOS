@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, Optional
 
 from fastapi import Depends
 from fastapi.params import Depends as DependsClass
 
 from app.agents.coder import CoderAgent
+from app.agents.reviewer import ReviewerAgent
 from app.agents.intent_parser import IntentParserAgent
 from app.agents.clarifier import ClarifierAgent
 from app.agents.skill_router import SkillRouterAgent
@@ -27,15 +28,12 @@ from app.infrastructure.external_apis.ollama_client import (
 )
 from app.infrastructure.queue.redis_rq_client import RedisRQQueueClient
 from app.infrastructure.queue.redis_rq_real_client import RedisRQRealClient
+from app.brain.memory_manager import MemoryManager
 
 
 _VECTOR_STORES: Dict[str, Any] = {}
 _RAG_SERVICES: Dict[str, RAGService] = {}
 _MONGODB_STORES: Dict[str, MongoDBStore] = {}
-
-
-def _parse_fallback_models(raw: str) -> List[str]:
-    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def get_settings_dep() -> Settings:
@@ -51,9 +49,7 @@ def get_llm_client(
     return OllamaLLMClient(
         base_url=settings.ollama_base_url,
         primary_model=model_name or settings.ollama_chat_model,
-        fallback_models=_parse_fallback_models(
-            settings.ollama_fallback_models
-        ),
+        fallback_models=[],
     )
 
 

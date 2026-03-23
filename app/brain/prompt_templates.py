@@ -410,6 +410,10 @@ Do NOT reveal chain-of-thought prose; output only structured JSON fields.
 5. Do NOT add deliver/schedule skills unless user explicitly asks to send/schedule.
 6. Avoid unsupported assumptions; if critical information is missing, set assumptions/open_questions accordingly.
 7. Keep plan practical and cost-aware.
+8. For EVERY skill, you MUST define explicit IO contract for inter-agent handoff:
+  - required_input_keys
+  - produced_output_keys
+  - acceptance_checks (how downstream agent validates this skill output)
 
 ## Advanced Planning Modes
 - `planning_mode = standard`: regular deterministic planning.
@@ -462,9 +466,21 @@ Return ONLY one JSON object (no markdown, no prose) with this schema:
       "skill_purpose": "string",
       "input_keys": ["string"],
       "output_keys": ["string"],
-      "coder_notes": "string"
+      "coder_notes": "string",
+      "acceptance_checks": ["string"]
     }
   ],
+  "execution_contract": {
+    "ordered_skills": ["skill-name"],
+    "handoff_rules": [
+      {
+        "from_skill": "skill-a",
+        "to_skill": "skill-b",
+        "required_outputs": ["key"],
+        "reason": "string"
+      }
+    ]
+  },
   "confidence": 0.0
 }
 
@@ -511,7 +527,8 @@ Return ONLY one JSON object (no markdown, no prose) with this schema:
       "skill_purpose": "Search Tavily.",
       "input_keys": ["topic"],
       "output_keys": ["results"],
-      "coder_notes": "URL: https://api.tavily.com/search. POST."
+      "coder_notes": "URL: https://api.tavily.com/search. POST.",
+      "acceptance_checks": ["results is non-empty list", "source_urls exists"]
     },
     {
       "skill_name": "send-report",
@@ -520,9 +537,21 @@ Return ONLY one JSON object (no markdown, no prose) with this schema:
       "skill_purpose": "SMTP delivery.",
       "input_keys": ["results", "recipient"],
       "output_keys": [],
-      "coder_notes": "Use SMTP SSL."
+      "coder_notes": "Use SMTP SSL.",
+      "acceptance_checks": ["email.sent == true"]
     }
-  ]
+  ],
+  "execution_contract": {
+    "ordered_skills": ["fetch-weather", "send-report"],
+    "handoff_rules": [
+      {
+        "from_skill": "fetch-weather",
+        "to_skill": "send-report",
+        "required_outputs": ["results"],
+        "reason": "Can du lieu truoc khi gui"
+      }
+    ]
+  }
 }
 
 ## Output
@@ -603,6 +632,9 @@ CODER_USER_TEMPLATE = """\
 ## Memory Context
 {memory_context}
 
+## Selected Skill Contract (from Planner)
+{skill_contract_json}
+
 Write the skill code for the skill named: {skill_name}
 
 ## Execution Plan Requirement
@@ -619,6 +651,8 @@ Do not print this plan; apply it directly in the code.
 - If this is a report/statistics skill (name/purpose contains report|bao-cao|thong-ke|phan-tich):
   - MUST read `input_data` (especially `results`/`topic`) and produce report from those values.
   - MUST include extracted numeric evidence in output.
+  - MUST include unit-aware extraction logic and context-based filtering for metrics.
+  - MUST NOT implement "take first number per source" heuristics.
   - MUST return error if data is missing instead of hallucinating.
 - Perform internal self-critique for runtime errors and missing branches before finalizing.
 - Do not output explanatory prose. Output code only.
@@ -926,7 +960,14 @@ def build_planner_messages(
     ]
 
 
-def build_coder_messages(plan_json: str, skill_name: str, runtime_context: str, memory_context: str = "", patch_mode: str = "create_new") -> List[Dict[str, str]]:
+def build_coder_messages(
+  plan_json: str,
+  skill_name: str,
+  runtime_context: str,
+  memory_context: str = "",
+  patch_mode: str = "create_new",
+  skill_contract_json: str = "{}",
+) -> List[Dict[str, str]]:
     return [
         {"role": "system", "content": CODER_SYSTEM_PROMPT},
         {"role": "user", "content": CODER_USER_TEMPLATE.format(
@@ -934,7 +975,8 @@ def build_coder_messages(plan_json: str, skill_name: str, runtime_context: str, 
             plan_json=plan_json,
             memory_context=memory_context,
             skill_name=skill_name,
-            patch_mode=patch_mode
+      patch_mode=patch_mode,
+      skill_contract_json=skill_contract_json,
         )}
     ]
 

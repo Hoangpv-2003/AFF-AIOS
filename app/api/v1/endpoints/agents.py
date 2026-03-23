@@ -9,11 +9,13 @@ import importlib.util
 import json
 import os
 import re
+import smtplib
 import subprocess
 import sys
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,23 +26,34 @@ from pydantic import BaseModel, Field
 
 from app.api.dependencies import (
     get_coder_agent,
+    get_intent_parser_agent,
     get_llm_client,
+    get_memory_manager,
     get_planner_agent,
     get_rag_service,
+    get_result_validator_agent,
     get_settings_dep,
+    get_skill_router_agent,
 )
 from app.agents.coder import CoderAgent
+from app.agents.intent_parser import IntentParserAgent
 from app.agents.manager import ManagerAgent
+from app.agents.result_validator import ResultValidatorAgent
+from app.agents.skill_router import SkillRouterAgent
+from app.agents.base_agent import AgentContext
 from app.brain.prompt_templates import (
     build_coder_messages,
     build_manager_orchestrator_messages,
+    build_synthesizer_messages,
     build_test_generation_messages,
 )
 from app.brain.planner import PlannerAgent
 from app.brain.rag import RAGService
+from app.brain.memory_manager import MemoryManager
 from app.core.config import Settings
 from app.infrastructure.external_apis.ollama_client import OllamaLLMClient
 from app.schemas.skills import SkillDigest, SkillState
+from app.services.job_scheduler import JobScheduler
 from app.skills.registry import SkillRecord, registry
 
 router = APIRouter()
@@ -94,49 +107,65 @@ def _strip_code_fences(text: str) -> str:
     return cleaned.strip()
 
 
-_INTENT_SCHEMA = """\
-Tra ve JSON duy nhat, khong markdown, khong giai thich:
-{
-  \"wants_skill\": true/false,
-  \"wants_report\": true/false,
-  \"wants_image\": true/false,
-  \"wants_schedule\": true/false,
-  \"wants_email\": true/false,
-  \"skill_hint\": \"string\"
-}"""
+def _intent_from_parser_payload(message: str, parsed: dict) -> dict:
+    base = {
+        "wants_skill": False,
+        "wants_report": False,
+        "wants_image": False,
+        "wants_schedule": False,
+        "wants_email": False,
+        "skill_hint": "",
+    }
+    if not isinstance(parsed, dict):
+        raise ValueError("Intent parser payload is not a JSON object")
+
+    action_type = str(parsed.get("action_type", "")).strip().lower()
+    entities = parsed.get("entities") if isinstance(parsed.get("entities"), dict) else {}
+    topic = str(entities.get("topic") or "").strip()
+
+    if action_type and action_type != "chat":
+        base["wants_skill"] = True
+    if action_type in {"deliver", "schedule", "pipeline", "generate", "analyse", "retrieve", "mutate"}:
+        base["wants_skill"] = True
+    if action_type == "deliver":
+        base["wants_email"] = True
+    if action_type == "schedule":
+        base["wants_schedule"] = True
+    if topic:
+        base["skill_hint"] = _slugify(topic)
+
+    recipient = str(entities.get("recipient") or "").strip()
+    schedule_time = str(entities.get("schedule_time") or "").strip()
+    if recipient:
+        base["wants_email"] = True
+    if schedule_time:
+        base["wants_schedule"] = True
+
+    steps = parsed.get("steps") if isinstance(parsed.get("steps"), list) else []
+    sub_actions = parsed.get("sub_actions") if isinstance(parsed.get("sub_actions"), list) else []
+    steps_text = json.dumps(steps, ensure_ascii=False).lower()
+    sub_actions_text = json.dumps(sub_actions, ensure_ascii=False).lower()
+    if "report" in steps_text or "bao cao" in steps_text or "report" in sub_actions_text:
+        base["wants_report"] = True
+        base["wants_skill"] = True
+
+    return base
 
 
-def _detect_intent(llm_client: OllamaLLMClient, message: str) -> dict:
-    prompt = (
-        "Phan tich yeu cau nguoi dung sau va tra ve JSON theo schema:\n"
-        f"Yeu cau: \"{message}\"\n\n"
-        f"Schema:\n{_INTENT_SCHEMA}\n\n"
-        "Luu y: wants_skill=true khi user can du lieu that (gia, thong ke, "
-        "tra cuu, tinh toan, phan tich) - khong phai cau hoi chung chung."
+def _detect_intent_with_parser(
+    *,
+    intent_parser: IntentParserAgent,
+    message: str,
+    task_id: str,
+) -> dict:
+    parsed_result = intent_parser.act(
+        AgentContext(task_id=task_id, trace_id=f"intent-{task_id}", prompt=message),
+        {"history": []},
     )
-    try:
-        raw = _generate_text_strict(llm_client, prompt)
-        intent = json.loads(raw)
-        defaults = {
-            "wants_skill": False,
-            "wants_report": False,
-            "wants_image": False,
-            "wants_schedule": False,
-            "wants_email": False,
-            "skill_hint": "",
-        }
-        defaults.update(intent)
-        return defaults
-    except Exception as exc:
-        return {
-            "wants_skill": False,
-            "wants_report": False,
-            "wants_image": False,
-            "wants_schedule": False,
-            "wants_email": False,
-            "skill_hint": "",
-            "_intent_error": str(exc),
-        }
+    payload = parsed_result.payload if isinstance(parsed_result.payload, dict) else {}
+    merged = _intent_from_parser_payload(message, payload)
+    merged["_intent_source"] = "intent_parser_agent"
+    return merged
 
 
 _SKILL_CONTRACT = """\
@@ -361,6 +390,7 @@ def _find_existing_skill(
     root: Path,
     task_prompt: str,
     rag_service: RAGService,
+    threshold: float,
 ) -> Optional[dict]:
     dynamic_root = root / "app" / "skills" / "dynamic"
     if dynamic_root.exists():
@@ -384,7 +414,7 @@ def _find_existing_skill(
     if not results:
         return None
     best = results[0]
-    if best.score < 0.65:
+    if best.score < threshold:
         return None
     skill_id = str(best.record.metadata.get("skill_id") or "")
     if not skill_id:
@@ -621,18 +651,12 @@ def _create_calendar_event(
     }
 
 
-def _send_email(
+def _send_email_resend(
     settings: Settings,
     to_email: str,
     subject: str,
     content: str,
 ) -> dict:
-    if settings.email_provider.lower() != "resend":
-        return {
-            "sent": False,
-            "provider": settings.email_provider,
-            "error": "Only resend provider is implemented",
-        }
     if not settings.resend_api_key or not settings.resend_from_email:
         return {
             "sent": False,
@@ -669,6 +693,300 @@ def _send_email(
             "error": str(exc),
             "to": to_email,
         }
+
+
+def _send_email_smtp(
+    settings: Settings,
+    to_email: str,
+    subject: str,
+    content: str,
+) -> dict:
+    if not settings.smtp_host or not settings.smtp_user or not settings.smtp_password:
+        return {
+            "sent": False,
+            "provider": "smtp",
+            "error": "Missing SMTP credentials",
+            "to": to_email,
+        }
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = settings.smtp_from_email or settings.smtp_user
+    msg["To"] = to_email
+    msg.set_content(content)
+
+    try:
+        if settings.smtp_port == 465:
+            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=15) as server:
+                server.login(settings.smtp_user, settings.smtp_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as server:
+                if settings.smtp_use_tls:
+                    server.starttls()
+                server.login(settings.smtp_user, settings.smtp_password)
+                server.send_message(msg)
+        return {"sent": True, "provider": "smtp", "to": to_email}
+    except Exception as exc:
+        return {
+            "sent": False,
+            "provider": "smtp",
+            "error": str(exc),
+            "to": to_email,
+        }
+
+
+def _send_email(
+    settings: Settings,
+    to_email: str,
+    subject: str,
+    content: str,
+) -> dict:
+    provider = settings.email_provider.lower().strip()
+    if provider == "smtp":
+        return _send_email_smtp(settings, to_email, subject, content)
+    if provider == "resend":
+        return _send_email_resend(settings, to_email, subject, content)
+    return {
+        "sent": False,
+        "provider": provider,
+        "error": "unsupported_email_provider",
+        "to": to_email,
+    }
+
+
+def _is_monthly_request(message: str) -> bool:
+    lowered = _normalize_text(message)
+    monthly_markers = ("hang thang", "moi thang", "monthly", "dinh ky thang")
+    return any(item in lowered for item in monthly_markers)
+
+
+def _build_schedule_job(
+    *,
+    settings: Settings,
+    message: str,
+    schedule_time: Optional[str],
+    skill_name: Optional[str],
+    parameters: dict,
+) -> dict:
+    if not skill_name:
+        return {
+            "provider": settings.calendar_provider.lower().strip() or "scheduler",
+            "status": "error",
+            "error": "No skill available to schedule",
+        }
+
+    run_at = _parse_schedule_time(schedule_time)
+    recurrence = "monthly" if _is_monthly_request(message) else "daily"
+    day_of_month = run_at.day if recurrence == "monthly" else None
+
+    scheduler = JobScheduler.get_instance()
+    job_id = scheduler.add_job(
+        skill_name=skill_name,
+        time_str=run_at.strftime("%H:%M"),
+        parameters=parameters,
+        recurrence=recurrence,
+        day_of_month=day_of_month,
+    )
+    return {
+        "provider": "job_scheduler",
+        "status": "scheduled",
+        "job_id": job_id,
+        "recurrence": recurrence,
+        "day_of_month": day_of_month,
+        "scheduled_for": run_at.isoformat(),
+    }
+
+
+def _skill_output_has_real_data(skill_output: Optional[dict]) -> bool:
+    if not isinstance(skill_output, dict):
+        return False
+    if str(skill_output.get("status", "")).lower() != "success":
+        return False
+    sources = skill_output.get("source_urls")
+    if not isinstance(sources, list) or not any(str(item).strip() for item in sources):
+        return False
+    if skill_output.get("results") in (None, [], {}):
+        return False
+    return True
+
+
+def _python_code_is_valid(code: str) -> bool:
+    try:
+        compile(code, "<generated-skill>", "exec")
+        return True
+    except Exception:
+        return False
+
+
+def _run_cli_style_chat_pipeline(
+    *,
+    task_id: str,
+    message: str,
+    intent_payload: dict,
+    user_email: Optional[str],
+    planner: PlannerAgent,
+    skill_router: SkillRouterAgent,
+    coder: CoderAgent,
+    validator: ResultValidatorAgent,
+    root: Path,
+) -> tuple[dict, list[dict], str, dict]:
+    plan_result = planner.act(
+        AgentContext(task_id=task_id, trace_id=f"plan-{task_id}", prompt=message),
+        {
+            "history": [],
+            "intent_json": intent_payload,
+            "runtime_context": "",
+            "planning_mode": "standard",
+        },
+    )
+    plan_data = (plan_result.payload or {}).get("plan") if plan_result.success else {}
+    if not isinstance(plan_data, dict):
+        plan_data = {}
+
+    available_skills_list: list[str] = []
+    for folder in ["static", "dynamic"]:
+        path = root / "app" / "skills" / folder
+        if path.exists():
+            available_skills_list.extend([f.stem for f in path.glob("*.py")])
+
+    route_result = skill_router.act(
+        AgentContext(task_id=task_id, trace_id=f"route-{task_id}", prompt=message),
+        {
+            "history": [],
+            "plan_json": json.dumps(plan_data, ensure_ascii=False),
+            "available_skills": ", ".join(available_skills_list),
+            "data_sources": "Tavily, RAG",
+            "runtime_context": "",
+        },
+    )
+    router_data = route_result.payload if route_result.success and isinstance(route_result.payload, dict) else {}
+
+    raw_build_list = router_data.get("skills_to_build", [])
+    skills_to_build_names: list[str] = []
+    if isinstance(raw_build_list, list):
+        for item in raw_build_list:
+            if isinstance(item, dict):
+                skills_to_build_names.append(str(item.get("skill_name", "")).strip())
+            else:
+                skills_to_build_names.append(str(item).strip())
+    skills_to_build_names = [name for name in skills_to_build_names if name]
+
+    skills_to_use = router_data.get("skills_to_use", [])
+    if not isinstance(skills_to_use, list):
+        skills_to_use = []
+    skills_to_use = [str(name).strip() for name in skills_to_use if str(name).strip()]
+
+    build_after_reuse: list[str] = []
+    for name in skills_to_build_names:
+        exists = any(
+            (root / "app" / "skills" / folder / f"{name}.py").exists()
+            for folder in ["static", "dynamic"]
+        )
+        if exists:
+            if name not in skills_to_use:
+                skills_to_use.append(name)
+        else:
+            build_after_reuse.append(name)
+    skills_to_build_names = build_after_reuse
+
+    executed_skills: list[str] = []
+    coding_errors: list[str] = []
+    executed_skills.extend(skills_to_use)
+
+    for skill_spec in plan_data.get("skills_to_create", []):
+        if not isinstance(skill_spec, dict):
+            continue
+        name = str(skill_spec.get("skill_name", "")).strip()
+        if not name or name not in skills_to_build_names:
+            continue
+
+        coder_result = coder.act(
+            AgentContext(task_id=task_id, trace_id=f"code-{task_id}", prompt=message),
+            {
+                "plan": plan_data,
+                "skill_name": name,
+                "runtime_context": "",
+                "total_llm_calls": 0,
+            },
+        )
+        artifacts = (coder_result.payload or {}).get("artifacts") if coder_result.success else {}
+        code_text = artifacts.get("generated_code", "") if isinstance(artifacts, dict) else ""
+        if not code_text:
+            coding_errors.append(f"Coder did not return code for skill {name}")
+            continue
+        if not _python_code_is_valid(code_text):
+            coding_errors.append(f"Generated invalid Python for skill {name}")
+            continue
+
+        is_static = bool(skill_spec.get("is_static", False))
+        folder = "static" if is_static else "dynamic"
+        save_path = root / "app" / "skills" / folder / f"{name}.py"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(code_text, encoding="utf-8")
+        if name not in executed_skills:
+            executed_skills.append(name)
+
+    ordered_by_plan: list[str] = []
+    for spec in plan_data.get("skills_to_create", []):
+        if not isinstance(spec, dict):
+            continue
+        s_name = str(spec.get("skill_name", "")).strip()
+        if s_name and s_name in executed_skills and s_name not in ordered_by_plan:
+            ordered_by_plan.append(s_name)
+    for s_name in executed_skills:
+        if s_name not in ordered_by_plan:
+            ordered_by_plan.append(s_name)
+    executed_skills = ordered_by_plan
+
+    execution_outputs: list[dict] = []
+    exec_summaries: list[str] = []
+    accumulated_data = dict(intent_payload.get("entities") or {})
+    if not str(accumulated_data.get("topic", "")).strip():
+        accumulated_data["topic"] = message
+    if user_email and not str(accumulated_data.get("recipient", "")).strip():
+        accumulated_data["recipient"] = user_email
+    for target in executed_skills:
+        exec_res = _execute_skill(root, target, input_data=accumulated_data)
+        execution_outputs.append({"skill": target, "result": exec_res})
+        if exec_res.get("status") == "success":
+            accumulated_data.update(exec_res)
+            exec_summaries.append(str(exec_res.get("summary") or f"Executed {target} successfully."))
+        else:
+            exec_summaries.append(f"Error in {target}: {exec_res.get('error_reason')}")
+
+    if not executed_skills:
+        exec_summary = " | ".join(coding_errors) if coding_errors else "Execution halted: no runnable skills selected."
+    else:
+        exec_summary = " | ".join(exec_summaries)
+
+    validator_input = {
+        "exec_summary": exec_summary,
+        "outputs": execution_outputs,
+    }
+    validation = validator.act(
+        AgentContext(task_id=task_id, trace_id=f"validate-{task_id}", prompt=message),
+        {
+            "original_request": message,
+            "skill_output": json.dumps(validator_input, ensure_ascii=False),
+            "expected_goal": str(plan_data.get("task_summary") or message),
+            "runtime_context": "",
+            "history": [],
+        },
+    )
+    validation_payload = validation.payload if isinstance(validation.payload, dict) else {}
+
+    debug_payload = {
+        "plan": plan_data,
+        "route": router_data,
+        "validation": {
+            "success": validation.success,
+            "reason_code": validation.reason_code,
+            "payload": validation_payload,
+        },
+    }
+
+    return plan_data, execution_outputs, exec_summary, debug_payload
 
 
 async def _step_materialize(
@@ -847,6 +1165,7 @@ async def run_and_materialize(
     llm_client: OllamaLLMClient = Depends(get_llm_client),
     rag_service: RAGService = Depends(get_rag_service),
     settings: Settings = Depends(get_settings_dep),
+    memory_manager: MemoryManager = Depends(get_memory_manager),
 ):
     debug_mode = bool(payload.debug or settings.debug)
     root = _repo_root()
@@ -871,6 +1190,7 @@ async def run_and_materialize(
             root=root,
             task_prompt=payload.prompt,
             rag_service=rag_service,
+            threshold=float(settings.existing_skill_reuse_score_threshold),
         )
         if existing and payload.skill_id is None:
             event = {
@@ -881,6 +1201,16 @@ async def run_and_materialize(
                 "match_score": existing["score"],
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
+            try:
+                memory_manager.store_fact(
+                    user_id="system",
+                    fact=(
+                        f"reused_skill={existing['skill_id']};"
+                        f"task_id={payload.task_id};score={existing['score']:.3f}"
+                    ),
+                )
+            except Exception:
+                pass
             return {
                 "task_id": result.task_id,
                 "final_state": result.final_state,
@@ -1020,6 +1350,13 @@ async def run_and_materialize(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     memory_status = _persist_short_and_long_memory(settings, event)
+    try:
+        memory_manager.store_fact(
+            user_id="system",
+            fact=f"materialized_skill={skill_name};task_id={payload.task_id}",
+        )
+    except Exception:
+        pass
 
     response: dict[str, Any] = {
         "task_id": result.task_id,
@@ -1047,9 +1384,13 @@ async def chat_agent(
     payload: AgentChatRequest,
     planner: PlannerAgent = Depends(get_planner_agent),
     coder: CoderAgent = Depends(get_coder_agent),
+    skill_router: SkillRouterAgent = Depends(get_skill_router_agent),
+    validator: ResultValidatorAgent = Depends(get_result_validator_agent),
     llm_client: OllamaLLMClient = Depends(get_llm_client),
+    intent_parser: IntentParserAgent = Depends(get_intent_parser_agent),
     rag_service: RAGService = Depends(get_rag_service),
     settings: Settings = Depends(get_settings_dep),
+    memory_manager: MemoryManager = Depends(get_memory_manager),
 ):
     message = payload.message.strip()
     if not message:
@@ -1058,80 +1399,132 @@ async def chat_agent(
     task_id = f"chat-{uuid.uuid4().hex[:10]}"
     root = _repo_root()
 
-    intent = _detect_intent(llm_client, message)
+    intent = _detect_intent_with_parser(
+        intent_parser=intent_parser,
+        message=message,
+        task_id=task_id,
+    )
+    if payload.user_email and not intent.get("wants_email"):
+        intent["wants_email"] = True
 
-    materialize_data = await _step_materialize(
+    plan_data, execution_outputs, exec_summary, pipeline_debug = _run_cli_style_chat_pipeline(
         task_id=task_id,
         message=message,
-        intent=intent,
+        intent_payload=intent,
+        user_email=payload.user_email,
         planner=planner,
+        skill_router=skill_router,
         coder=coder,
-        llm_client=llm_client,
-        rag_service=rag_service,
-        settings=settings,
-        force_new=payload.force_new,
-        debug=payload.debug,
-    )
-
-    exec_result = _step_execute_and_summarize(
+        validator=validator,
         root=root,
-        message=message,
-        materialize_data=materialize_data,
-        llm_client=llm_client,
     )
-    skill_output: Optional[dict] = exec_result.get("skill_output")
-    reply: Optional[str] = exec_result.get("reply")
 
-    if not reply:
-        rag_ctx = _fetch_rag_context(message, rag_service)
-        direct_prompt = (
-            f"Nguoi dung hoi: \"{message}\"\n\n"
-            f"Context tu knowledge base:\n{rag_ctx[:800]}\n\n"
-            "Tra loi ngan gon, tu nhien bang tieng Viet."
-        )
-        try:
-            reply = _generate_text_strict(llm_client, direct_prompt)
-        except ValueError as exc:
-            reply = f"Xin loi, he thong dang gap su co: {exc}"
+    skill_output: Optional[dict] = None
+    for item in execution_outputs:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        if isinstance(result, dict) and str(result.get("status", "")).lower() == "success":
+            skill_output = result
+
+    synth_messages = build_synthesizer_messages(message, exec_summary)
+    synth_prompt = f"{synth_messages[0]['content']}\n\n{synth_messages[1]['content']}"
+    try:
+        raw_reply = _generate_text_strict(llm_client, synth_prompt)
+        parsed_reply = json.loads(raw_reply) if raw_reply.startswith("{") else {"reply": raw_reply}
+        reply = str(parsed_reply.get("reply") or raw_reply).strip()
+    except Exception as exc:
+        reply = f"Khong the tong hop phan hoi: {exc}. Ket qua: {exec_summary}"
 
     report_files = None
     report_markdown = None
+    report_quality_error = None
     if intent.get("wants_report") and skill_output:
-        report_markdown = (
-            "# Bao Cao\n\n"
-            f"- Thoi gian: {datetime.now(timezone.utc).isoformat()}\n"
-            f"- Yeu cau: {message}\n\n"
-            f"## Ket Qua\n\n{reply}\n\n"
-            "## Du Lieu Chi Tiet\n\n"
-            "```json\n"
-            f"{json.dumps(skill_output, ensure_ascii=False, indent=2)}\n"
-            "```\n"
-        )
-        report_files = _save_report_files(task_id, report_markdown)
+        if not _skill_output_has_real_data(skill_output):
+            report_quality_error = (
+                "Bao cao yeu cau du lieu that, nhung skill output chua dat quality gate."
+            )
+        else:
+            report_markdown = (
+                "# Bao Cao\n\n"
+                f"- Thoi gian: {datetime.now(timezone.utc).isoformat()}\n"
+                f"- Yeu cau: {message}\n\n"
+                f"## Ket Qua\n\n{reply}\n\n"
+                "## Du Lieu Chi Tiet\n\n"
+                "```json\n"
+                f"{json.dumps(skill_output, ensure_ascii=False, indent=2)}\n"
+                "```\n"
+            )
+            report_files = _save_report_files(task_id, report_markdown)
 
     image_base64 = None
+    image_error = None
     if intent.get("wants_image"):
         image_base64 = _extract_chart_base64(skill_output)
         if not image_base64:
-            image_base64 = _render_text_image_base64(reply or message)
+            image_error = (
+                "Skill output khong co chart/image hop le; bo qua artifact hinh anh de tranh fake chart."
+            )
+
+    materialized_skill_id = None
+    for spec in plan_data.get("skills_to_create", []):
+        if isinstance(spec, dict):
+            materialized_skill_id = str(spec.get("skill_name") or "").strip() or materialized_skill_id
 
     schedule_info = None
     if intent.get("wants_schedule"):
-        schedule_info = _create_calendar_event(
+        schedule_info = _build_schedule_job(
             settings=settings,
             message=message,
             schedule_time=payload.schedule_time,
+            skill_name=materialized_skill_id,
+            parameters={
+                "message": message,
+                "user_email": payload.user_email,
+                "report_required": bool(intent.get("wants_report")),
+                "email_required": bool(intent.get("wants_email")),
+            },
         )
 
     email_result = None
     if intent.get("wants_email") and payload.user_email:
-        content = report_markdown or reply or message
-        email_result = _send_email(
-            settings=settings,
-            to_email=payload.user_email,
-            subject="AAF-AIOS Agent Result",
-            content=content,
+        if report_quality_error:
+            email_result = {
+                "sent": False,
+                "error": "Quality gate failed for report data, email not sent",
+                "to": payload.user_email,
+            }
+        else:
+            content = report_markdown or reply or message
+            email_result = _send_email(
+                settings=settings,
+                to_email=payload.user_email,
+                subject="AAF-AIOS Agent Result",
+                content=content,
+            )
+
+    user_id = payload.user_email or "anonymous"
+    try:
+        memory_manager.store_chat_turn(
+            user_id=user_id,
+            message=message,
+            reply=reply or "",
         )
+        if payload.user_email:
+            memory_manager.store_fact(
+                user_id=user_id,
+                fact=f"preferred_email={payload.user_email}",
+            )
+        if intent.get("wants_schedule") and schedule_info and schedule_info.get("status") == "scheduled":
+            memory_manager.store_fact(
+                user_id=user_id,
+                fact=(
+                    "recurring_schedule="
+                    f"{schedule_info.get('recurrence')}:{schedule_info.get('scheduled_for')}"
+                ),
+            )
+    except Exception:
+        pass
 
     response: dict[str, Any] = {
         "task_id": task_id,
@@ -1141,6 +1534,8 @@ async def chat_agent(
             "report_markdown": report_markdown,
             "report_files": report_files,
             "image_base64": image_base64,
+            "image_error": image_error,
+            "report_quality_error": report_quality_error,
             "schedule": schedule_info,
             "email": email_result,
         },
@@ -1148,7 +1543,8 @@ async def chat_agent(
     if payload.debug:
         response["_debug"] = {
             "intent": intent,
-            "materialize": materialize_data,
+            "pipeline": pipeline_debug,
+            "execution_outputs": execution_outputs,
         }
     return response
 
@@ -1163,9 +1559,13 @@ async def chat_agent_with_upload(
     debug: bool = Form(default=False),
     planner: PlannerAgent = Depends(get_planner_agent),
     coder: CoderAgent = Depends(get_coder_agent),
+    skill_router: SkillRouterAgent = Depends(get_skill_router_agent),
+    validator: ResultValidatorAgent = Depends(get_result_validator_agent),
     llm_client: OllamaLLMClient = Depends(get_llm_client),
+    intent_parser: IntentParserAgent = Depends(get_intent_parser_agent),
     rag_service: RAGService = Depends(get_rag_service),
     settings: Settings = Depends(get_settings_dep),
+    memory_manager: MemoryManager = Depends(get_memory_manager),
 ):
     raw = await file.read()
     file_text = ""
@@ -1199,9 +1599,13 @@ async def chat_agent_with_upload(
         ),
         planner=planner,
         coder=coder,
+        skill_router=skill_router,
+        validator=validator,
         llm_client=llm_client,
+        intent_parser=intent_parser,
         rag_service=rag_service,
         settings=settings,
+        memory_manager=memory_manager,
     )
     result["uploaded_file"] = {
         "filename": file.filename,
