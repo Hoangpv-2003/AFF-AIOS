@@ -47,7 +47,7 @@ class MemoryManager:
         canonical = f"{user_id}:{fact.lower().strip()}"
         return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
 
-    def store_chat_turn(self, user_id: str, message: str, reply: str):
+    async def store_chat_turn(self, user_id: str, message: str, reply: str):
         """Stores a conversation turn in MongoDB and RAG."""
         message = self._normalize_text(message)
         reply = self._normalize_text(reply)
@@ -65,13 +65,13 @@ class MemoryManager:
 
         # 2. Store in RAG for semantic search
         text = f"User: {message}\nAssistant: {reply}"
-        self.rag.ingest(
+        await self.rag.ingest(
             record_id=f"chat_{uuid.uuid4().hex}",
             text=text,
             metadata={"type": "chat", "user_id": user_id},
         )
 
-    def store_fact(self, user_id: str, fact: str):
+    async def store_fact(self, user_id: str, fact: str):
         """Stores a long-term fact about the user."""
         fact = self._normalize_text(fact)
         if not fact:
@@ -92,7 +92,7 @@ class MemoryManager:
                 )
 
         # 2. Store in RAG
-        self.rag.ingest(
+        await self.rag.ingest(
             record_id=f"fact_{fingerprint}",
             text=fact,
             metadata={
@@ -102,10 +102,10 @@ class MemoryManager:
             },
         )
 
-    def get_context(self, query: str, user_id: str, top_k: int = 5) -> str:
+    async def get_context(self, query: str, user_id: str, top_k: int = 5) -> str:
         """Retrieves semantic context for a query."""
         top_k = max(1, int(top_k))
-        return self.rag.build_grouped_context(
+        return await self.rag.build_grouped_context(
             query_text=query,
             user_id=user_id,
             facts_top_k=max(1, min(3, top_k)),

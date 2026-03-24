@@ -1,259 +1,266 @@
-"""Manager orchestrator with explicit state machine for agent flow."""
+"""Master Orchestrator / Pipeline Manager (v2.0)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+import asyncio
+import json
+import logging
+from datetime import datetime, timezone as dt_timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from app.agents.base_agent import AgentContext
+from app.agents.context_injector import ContextInjectorAgent
+from app.agents.intent_parser import IntentParserAgent
+from app.agents.planner import PlannerAgent
+from app.agents.skill_router import SkillRouterAgent
 from app.agents.coder import CoderAgent
 from app.agents.reviewer import ReviewerAgent
-from app.brain.planner import PlannerAgent
-from app.core.constants import ADMISSION_DEPTH_THRESHOLDS
-from app.core.constants import ADMISSION_REASON_CODES
-from app.core.constants import QUEUE_CLASSES
-from app.infrastructure.queue.redis_rq_client import RedisRQQueueClient
+from app.agents.skill_runner import SkillRunnerAgent
+from app.agents.result_validator import ResultValidatorAgent
+from app.agents.synthesizer import SynthesizerAgent
+from app.agents.error_handler import ErrorHandlerAgent
+from app.core.config import get_settings
 
+logger = logging.getLogger(__name__)
 
-@dataclass
-class ManagerRunResult:
-    task_id: str
-    final_state: str
-    transitions: List[str] = field(default_factory=list)
-    reason_code: Optional[str] = None
-    execution_log: List[Dict[str, object]] = field(default_factory=list)
+class UnifiedPipelineManager:
+    """The explicit 10-Phase State Machine Orchestrator for AIOS."""
+    
+    def __init__(self, llm_client: Any) -> None:
+        self.llm_client = llm_client
+        self.settings = get_settings()
+        
+        # Initialize the 10 nodes
+        self.nodes = {
+            "context_injector": ContextInjectorAgent(llm_client),
+            "intent_parser": IntentParserAgent(llm_client),
+            "planner": PlannerAgent(llm_client),
+            "skill_router": SkillRouterAgent(llm_client),
+            "coder": CoderAgent(llm_client),     # Reviewer is initialized inside Coder for tight loop
+            "skill_runner": SkillRunnerAgent(),  # Sandbox integration wrapped here
+            "result_validator": ResultValidatorAgent(llm_client),
+            "synthesizer": SynthesizerAgent(llm_client),
+            "error_handler": ErrorHandlerAgent(llm_client),
+            "delivery": None # Terminal state
+        }
 
-
-class ManagerAgent:
-    VALID_TRANSITIONS = {
-        "RECEIVED": {"INTENT_PARSED", "FAILED", "CANCELLED"},
-        "INTENT_PARSED": {"PLANNED", "FAILED", "CANCELLED"},
-        "PLANNED": {"ROUTED", "FAILED", "CANCELLED"},
-        "ROUTED": {"CODED", "FAILED", "CANCELLED"},
-        "CODED": {"REVIEWED_PASS", "REVIEWED_WARN", "FAILED", "CANCELLED"},
-        "REVIEWED_PASS": {"WAITING_APPROVAL", "FAILED", "CANCELLED"},
-        "REVIEWED_WARN": {"CODED", "WAITING_APPROVAL", "FAILED", "CANCELLED"},
-        "WAITING_APPROVAL": {"APPROVED", "FAILED", "CANCELLED"},
-        "APPROVED": {"EXECUTED", "FAILED", "CANCELLED"},
-        "EXECUTED": {"VALIDATED", "FAILED", "CANCELLED"},
-        "VALIDATED": {"FINISHED", "FAILED", "CANCELLED"},
-        "FINISHED": set(),
-        "FAILED": set(),
-        "CANCELLED": set(),
-    }
-
-    def __init__(
-        self,
-        intent_parser: Optional[Any] = None,  # Placeholder for new agents
-        planner: Optional[PlannerAgent] = None,
-        router: Optional[Any] = None,
-        coder: Optional[CoderAgent] = None,
-        reviewer: Optional[ReviewerAgent] = None,
-        validator: Optional[Any] = None,
-        queue_client: Optional[RedisRQQueueClient] = None,
-        history_manager: Optional[Any] = None,
-        retry_on_warn: bool = True,
-        max_warn_retries: int = 1,
-    ) -> None:
-        self.planner = planner or PlannerAgent()
-        self.coder = coder or CoderAgent()
-        self.reviewer = reviewer or ReviewerAgent()
-        self.queue_client = queue_client or RedisRQQueueClient()
-        self.retry_on_warn = retry_on_warn
-        self.max_warn_retries = max(0, int(max_warn_retries))
-        self._provider_failures = 0
-
-    def transition(self, current: str, next_state: str) -> str:
-        allowed = self.VALID_TRANSITIONS.get(current, set())
-        if next_state not in allowed:
-            raise ValueError(f"Illegal transition: {current} -> {next_state}")
-        return next_state
-
-    def evaluate_admission(self, priority: str) -> Tuple[bool, str]:
-        if priority not in QUEUE_CLASSES:
-            return False, ADMISSION_REASON_CODES["invalid_priority"]
-
-        depth = self.queue_client.queue_depth(priority)
-        threshold = ADMISSION_DEPTH_THRESHOLDS.get(priority, 0)
-        if depth > threshold:
-            return False, ADMISSION_REASON_CODES["queue_overloaded"]
-        return True, ADMISSION_REASON_CODES["accepted"]
-
-    def _forced_terminal_state(
-        self,
-        state: str,
-        *,
-        cancel_at_state: Optional[str],
-        fail_at_state: Optional[str],
-    ) -> Tuple[Optional[str], Optional[str]]:
-        if cancel_at_state and state == cancel_at_state:
-            return "CANCELLED", "USER_CANCELLED"
-        if fail_at_state and state == fail_at_state:
-            return "FAILED", "TIMEOUT"
-        return None, None
-
-    def _normalize_reviewer_outcome(
-        self,
-        review_payload: Dict[str, Any],
-    ) -> Tuple[str, Optional[str]]:
-        verdict = review_payload.get("verdict")
-        if not isinstance(verdict, dict):
-            verdict = review_payload
-
-        raw_status = verdict.get("status", "")
-        if hasattr(raw_status, "value"):
-            status = str(getattr(raw_status, "value")).strip().lower()
-        else:
-            status = str(raw_status).strip().lower()
-        reason_code = verdict.get("reason_code")
-        if reason_code is not None:
-            reason_code = str(reason_code)
-
-        if status == "pass":
-            return "pass", None
-        if status == "warn":
-            return "warn", reason_code or "VALIDATION_FAILED"
-        if status == "fail":
-            return "fail", reason_code or "VALIDATION_FAILED"
-
-        # Backward-compatible verdict format used by reviewer.review_artifacts
-        if bool(verdict.get("is_approved")):
-            return "pass", None
-        return "warn", reason_code or "VALIDATION_FAILED"
-
-    def run(
+    async def run_pipeline(
         self,
         task_id: str,
-        prompt: str,
-        priority: str = "standard",
-        context_data: Optional[Dict] = None,
-        cancel_at_state: Optional[str] = None,
-        fail_at_state: Optional[str] = None,
-    ) -> ManagerRunResult:
-        transitions: List[str] = []
-        execution_log: List[Dict[str, object]] = []
-        state = "RECEIVED"
-        transitions.append(state)
-        reason_code: Optional[str] = None
-
-        def move(next_state: str) -> str:
-            nonlocal state
-            state = self.transition(state, next_state)
-            transitions.append(state)
-            return state
-
-        accepted, admission_reason = self.evaluate_admission(priority)
-        if not accepted:
-            move("FAILED")
-            return ManagerRunResult(
-                task_id=task_id,
-                final_state=state,
-                transitions=transitions,
-                reason_code=admission_reason,
-                execution_log=execution_log,
-            )
-
-        try:
-            for next_state in ("INTENT_PARSED", "PLANNED", "ROUTED"):
-                move(next_state)
-                terminal_state, terminal_reason = self._forced_terminal_state(
-                    state,
-                    cancel_at_state=cancel_at_state,
-                    fail_at_state=fail_at_state,
-                )
-                if terminal_state:
-                    move(terminal_state)
-                    reason_code = terminal_reason
-                    return ManagerRunResult(
-                        task_id=task_id,
-                        final_state=state,
-                        transitions=transitions,
-                        reason_code=reason_code,
-                        execution_log=execution_log,
+        user_prompt: str,
+        history: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Execute the 10-phase pipeline loop until Delivery or ABORT."""
+        
+        # State Machine memory
+        pipeline_state = {
+            "task_id": task_id,
+            "original_prompt": user_prompt,
+            "history": history or [],
+            "current_phase": "context_injector",
+            "execution_context": {},
+            "intent_output": {},
+            "plan_output": {},
+            "router_output": {},
+            "skill_outputs": {},
+            "validation_results": {},
+            "synthesis_output": {},
+            "errors": [],
+            "debug_trace": []
+        }
+        
+        max_hops = 25
+        hop_count = 0
+        
+        while pipeline_state["current_phase"] != "delivery" and hop_count < max_hops:
+            hop_count += 1
+            current_phase = pipeline_state["current_phase"]
+            
+            logger.info(f"Pipeline [Hop {hop_count}]: Executing >> {current_phase.upper()}")
+            pipeline_state["debug_trace"].append(f"ENTER: {current_phase}")
+            
+            node = self.nodes.get(current_phase)
+            if not node:
+                raise ValueError(f"Unknown phase requested: {current_phase}")
+                
+            try:
+                # Dispatch based on phase
+                if current_phase == "context_injector":
+                    res = await node.act(AgentContext(task_id, f"ctx-{task_id}", user_prompt), {"history": pipeline_state["history"]})
+                    if res.success:
+                        pipeline_state["execution_context"] = res.payload
+                        pipeline_state["current_phase"] = "intent_parser"
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "intent_parser":
+                    res = await node.act(
+                        AgentContext(task_id, f"intent-{task_id}", user_prompt), 
+                        {"message": user_prompt, "runtime_context_str": pipeline_state["execution_context"].get("runtime_context_str")}
                     )
-
-            warn_retries_used = 0
-            while True:
-                move("CODED")
-                terminal_state, terminal_reason = self._forced_terminal_state(
-                    state,
-                    cancel_at_state=cancel_at_state,
-                    fail_at_state=fail_at_state,
-                )
-                if terminal_state:
-                    move(terminal_state)
-                    reason_code = terminal_reason
-                    break
-
-                review_context = AgentContext(
-                    task_id=task_id,
-                    trace_id=f"trace-{task_id}",
-                    prompt=prompt,
-                    priority=priority,
-                    metadata=context_data or {},
-                )
-                review_inputs = {
-                    "code_text": (
-                        "def run(input_data=None, **kwargs):\n"
-                        "    return {'status': 'success'}\n"
-                    ),
-                    "iteration": warn_retries_used + 1,
-                }
-                review_result = self.reviewer.act(
-                    review_context,
-                    review_inputs,
-                )
-
-                if not review_result.success:
-                    move("REVIEWED_WARN")
-                    reason_code = review_result.reason_code or "PROVIDER_ERROR"
-                    move("WAITING_APPROVAL")
-                    break
-
-                review_status, review_reason = (
-                    self._normalize_reviewer_outcome(
-                        review_result.payload or {}
+                    if res.success:
+                        pipeline_state["intent_output"] = res.payload.get("intent_output", {})
+                        pipeline_state["current_phase"] = res.payload.get("next_phase", "error_handler")
+                        if not res.payload.get("proceed_to_phase3"):
+                            pipeline_state["synthesis_output"] = {"reply": res.payload.get("clarification")}
+                            pipeline_state["current_phase"] = "delivery"
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "planner":
+                    res = await node.act(
+                        AgentContext(task_id, f"plan-{task_id}", user_prompt),
+                        {"intent_output": pipeline_state["intent_output"], "runtime_context_str": pipeline_state["execution_context"].get("runtime_context_str")}
                     )
-                )
-                if review_status == "pass":
-                    move("REVIEWED_PASS")
-                    move("WAITING_APPROVAL")
-                    break
-
-                if review_status == "fail":
-                    reason_code = review_reason or "VALIDATION_FAILED"
-                    move("FAILED")
-                    break
-
-                move("REVIEWED_WARN")
-                reason_code = review_reason or "VALIDATION_FAILED"
-                if (
-                    self.retry_on_warn
-                    and warn_retries_used < self.max_warn_retries
-                ):
-                    warn_retries_used += 1
-                    execution_log.append(
+                    if res.success:
+                        pipeline_state["plan_output"] = res.payload.get("execution_plan", {})
+                        print(f"\n[DEBUG] PLANNER OUTPUT KEYS: {list(pipeline_state['plan_output'].keys())}")
+                        pipeline_state["current_phase"] = res.payload.get("next_phase", "skill_router")
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "skill_router":
+                    tools_status = self._get_tools_status()
+                    res = await node.act(
+                        AgentContext(task_id, f"router-{task_id}", user_prompt),
                         {
-                            "event": "retry_on_warn",
-                            "attempt": warn_retries_used,
-                            "reason_code": reason_code,
+                            "execution_plan": pipeline_state["plan_output"], 
+                            "runtime_context_str": pipeline_state["execution_context"].get("runtime_context_str"),
+                            "tools_status": tools_status
                         }
                     )
-                    continue
+                    if res.success:
+                        pipeline_state["router_output"] = res.payload
+                        if res.payload.get("skills_to_build"):
+                            pipeline_state["current_phase"] = "coder"
+                        else:
+                            pipeline_state["current_phase"] = "skill_runner"
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "coder":
+                    skills_to_build = pipeline_state["router_output"].get("skills_to_build", [])
+                    if not skills_to_build:
+                        pipeline_state["current_phase"] = "skill_runner"
+                        continue
+                        
+                    res = await node.act(
+                        AgentContext(task_id, f"code-{task_id}", user_prompt),
+                        {
+                            "step_id": skills_to_build[0], 
+                            "requirement": f"Create skill: {skills_to_build[0]} according to planner.", 
+                            "mode": "create",
+                            "plan_output": pipeline_state["plan_output"],
+                            "execution_context": pipeline_state["execution_context"]
+                        }
+                    )
+                    if res.success:
+                        # Register dynamically created tool
+                        pipeline_state["current_phase"] = res.payload.get("next_phase", "error_handler")
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "skill_runner":
+                    res = await node.act(
+                        AgentContext(task_id, f"run-{task_id}", user_prompt),
+                        {"steps_to_execute": pipeline_state["plan_output"].get("steps", []), "parallelizable_groups": pipeline_state["plan_output"].get("parallelizable_groups", [])}
+                    )
+                    if res.success:
+                        pipeline_state["skill_outputs"] = res.payload.get("step_results", {})
+                        pipeline_state["current_phase"] = res.payload.get("next_phase", "result_validator")
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "result_validator":
+                    attempt = pipeline_state.get("validation_attempts", 0) + 1
+                    pipeline_state["validation_attempts"] = attempt
+                    res = await node.act(
+                        AgentContext(task_id, f"validate-{task_id}", user_prompt),
+                        {"skill_runner_output": pipeline_state["skill_outputs"], "attempt": attempt}
+                    )
+                    if res.success:
+                        pipeline_state["validation_results"] = res.payload
+                        pipeline_state["current_phase"] = res.payload.get("next_phase", "synthesizer")
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "synthesizer":
+                    res = await node.act(
+                        AgentContext(task_id, f"synth-{task_id}", user_prompt),
+                        {
+                            "execution_context_str": pipeline_state["execution_context"].get("runtime_context_str", ""),
+                            "step_results": pipeline_state["skill_outputs"],
+                            "errors": pipeline_state["errors"]
+                        }
+                    )
+                    if res.success:
+                        pipeline_state["synthesis_output"] = res.payload.get("synthesis_output", {})
+                        pipeline_state["current_phase"] = "delivery"
+                    else:
+                        raise Exception(res.payload.get("error"))
+                        
+                elif current_phase == "error_handler":
+                    last_error = pipeline_state["errors"][-1] if pipeline_state["errors"] else {"tier": 3, "message": "Unknown error routed to handler."}
+                    res = await node.act(
+                        AgentContext(task_id, f"error-{task_id}", user_prompt),
+                        {"error_info": last_error}
+                    )
+                    if res.success:
+                        pipeline_state["synthesis_output"] = {"reply": res.payload.get("error_response", {}).get("explanation", "Lỗi rùi.")}
+                        pipeline_state["current_phase"] = res.payload.get("next_phase", "delivery")
+                    else:
+                        pipeline_state["current_phase"] = "delivery"
 
-                move("WAITING_APPROVAL")
-                break
+            except Exception as loop_err:
+                import traceback
+                traceback.print_exc()
+                pipeline_state["errors"].append({
+                    "phase": current_phase,
+                    "message": str(loop_err),
+                    "tier": 1 if "timeout" in str(loop_err).lower() else 3,
+                    "context": {"attempt": 1}
+                })
+                pipeline_state["current_phase"] = "error_handler"
 
-        except Exception as e:
-            execution_log.append({"error": str(e)})
-            state = "FAILED"
-            transitions.append(state)
-            reason_code = reason_code or "VALIDATION_FAILED"
+        if hop_count >= max_hops:
+            logger.error("Pipeline reached maximum hop count (infinite loop aborted).")
+            pipeline_state["synthesis_output"] = {"reply": "Hệ thống bị treo do lặp quá nhiều lần. Đã hủy bỏ tác vụ."}
+            
+        return pipeline_state
 
-        return ManagerRunResult(
-            task_id=task_id,
-            final_state=state,
-            transitions=transitions,
-            reason_code=reason_code,
-            execution_log=execution_log,
-        )
+    def _get_tools_status(self) -> Dict[str, str]:
+        """Scan static and dynamic skills to see what's available."""
+        tools = {}
+        paths = [
+            Path("app/skills/static"),
+            Path("app/skills/dynamic")
+        ]
+        for p in paths:
+            if p.exists():
+                for f in p.glob("*.py"):
+                    if f.name != "__init__.py":
+                        name = f.stem.replace("_", "-")
+                        tools[name] = "healthy"
+        return tools
+
+# =========================================================================================
+# Legacy Interface compatibility export (for existing CLIs or runners missing _run_cli_style_chat_pipeline)
+# =========================================================================================
+
+async def _run_cli_style_chat_pipeline(manager, task_id: str, prompt: str, history=None) -> tuple:
+    """Compatibility shim returning (plan_data, execution_outputs, exec_summary, pipeline_debug)."""
+    if isinstance(manager, UnifiedPipelineManager):
+        result = await manager.run_pipeline(task_id, prompt, history)
+        
+        # Unpack to match legacy tuple
+        plan_data = result.get("plan_output", {})
+        execution_outputs = list(result.get("skill_outputs", {}).values())
+        exec_summary = result.get("synthesis_output", {}).get("reply", "Task Completed.")
+        pipeline_debug = result.get("debug_trace", [])
+        return plan_data, execution_outputs, exec_summary, pipeline_debug
+        
+    # If legacy manager exists
+    res = await manager.run(task_id, prompt, history)
+    artifacts = res.artifacts if hasattr(res, "artifacts") else {}
+    return {}, res.execution_results, res.reply, artifacts

@@ -23,6 +23,7 @@ from app.infrastructure.observability.tracing import (
     get_tracer,
 )
 from app.services.job_scheduler import JobScheduler
+from app.skills.registry import registry
 
 
 def create_app() -> FastAPI:
@@ -33,6 +34,8 @@ def create_app() -> FastAPI:
         # Khởi động Job Scheduler và khôi phục jobs từ MongoDB
         scheduler = JobScheduler.get_instance()
         scheduler.reload_from_db()
+        # Khôi phục Skill Registry từ MongoDB
+        registry.load_from_db()
         try:
             yield
         finally:

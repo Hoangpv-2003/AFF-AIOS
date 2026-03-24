@@ -13,7 +13,11 @@ from app.agents.intent_parser import IntentParserAgent
 from app.agents.clarifier import ClarifierAgent
 from app.agents.skill_router import SkillRouterAgent
 from app.agents.result_validator import ResultValidatorAgent
+from app.agents.orchestrator import OrchestratorAgent
 from app.agents.error_handler import ErrorHandlerAgent
+from app.agents.context_injector import ContextInjectorAgent
+from app.agents.synthesizer import SynthesizerAgent
+from app.agents.manager import ManagerAgent
 from app.brain.rag import EmbeddingClient, RAGService
 from app.brain.planner import PlannerAgent
 from app.core.config import Settings, get_settings
@@ -228,6 +232,52 @@ def get_error_handler_agent(
     llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
 ) -> ErrorHandlerAgent:
     return ErrorHandlerAgent(llm_client=llm_client)
+
+
+def get_orchestrator_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> OrchestratorAgent:
+    return OrchestratorAgent(llm_client=llm_client)
+
+
+def get_context_injector_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> ContextInjectorAgent:
+    return ContextInjectorAgent(llm_client=llm_client)
+
+
+def get_synthesizer_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+) -> SynthesizerAgent:
+    return SynthesizerAgent(llm_client=llm_client)
+
+
+def get_manager_agent(
+    llm_client: OllamaLLMClient = Depends(get_agent_llm_client),
+    context_injector: ContextInjectorAgent = Depends(get_context_injector_agent),
+    intent_parser: IntentParserAgent = Depends(get_intent_parser_agent),
+    clarifier: ClarifierAgent = Depends(get_clarifier_agent),
+    planner: PlannerAgent = Depends(get_planner_agent),
+    router: SkillRouterAgent = Depends(get_skill_router_agent),
+    orchestrator: OrchestratorAgent = Depends(get_orchestrator_agent),
+    coder: CoderAgent = Depends(get_coder_agent),
+    reviewer: ReviewerAgent = Depends(get_reviewer_agent),
+    validator: ResultValidatorAgent = Depends(get_result_validator_agent),
+    synthesizer: SynthesizerAgent = Depends(get_synthesizer_agent),
+) -> ManagerAgent:
+    return ManagerAgent(
+        llm_client=llm_client,
+        context_injector=context_injector,
+        intent_parser=intent_parser,
+        clarifier=clarifier,
+        planner=planner,
+        router=router,
+        orchestrator=orchestrator,
+        coder=coder,
+        reviewer=reviewer,
+        validator=validator,
+        synthesizer=synthesizer,
+    )
 
 
 def get_auth_context() -> AuthContext:

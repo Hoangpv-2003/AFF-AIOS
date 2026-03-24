@@ -12,7 +12,7 @@ class ClarifierAgent(BaseAgent):
     def __init__(self, llm_client: Any = None) -> None:
         self.llm_client = llm_client
 
-    def act(
+    async def act(
         self,
         context: AgentContext,
         inputs: Dict[str, Any],
@@ -24,7 +24,7 @@ class ClarifierAgent(BaseAgent):
         full_prompt = f"{messages[0]['content']}\n\n{messages[1]['content']}"
 
         try:
-            raw = self.llm_client.generate(prompt=full_prompt, response_format="json")
+            raw = await self.llm_client.generate_async(prompt=full_prompt)
             data = json.loads(raw)
             return AgentResult(success=True, payload=data)
         except Exception as exc:

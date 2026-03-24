@@ -24,8 +24,36 @@ class Settings(BaseSettings):
     debug: bool = False
 
     api_prefix: str = "/api/v1"
+    timezone: str = "Asia/Ho_Chi_Minh"
+    locale: str = "vi-VN"
 
     demo_mode: bool = True
+
+    # [V2.0 SYSTEM CONSTANTS]
+    # Execution Loop Constraints
+    MAX_VALIDATOR_RETRIES: int = 2
+    MAX_PLANNER_ITERATIONS: int = 3
+    MAX_CODE_REVIEW_ROUNDS: int = 3
+    MAX_CONCURRENT_TASKS: int = 3
+    
+    # Confidence Thresholds
+    CONFIDENCE_INTENT: float = 0.75
+    CONFIDENCE_VALIDATION: float = 0.80
+    CONFIDENCE_CODE_QUALITY: float = 0.85
+
+    # Timeout Constraints
+    TIMEOUT_REALTIME_FETCH: int = 10
+    TIMEOUT_CODE_REVIEW: int = 10
+    TIMEOUT_TOOL_EXEC_DEFAULT: int = 30
+    TIMEOUT_USER_INTERACTION: int = 300
+
+    # Backoff Strategy
+    RETRY_INITIAL_DELAY: float = 0.5
+    RETRY_MULTIPLIER: float = 2.0
+    RETRY_MAX_DELAY: float = 30.0
+    RETRY_JITTER: float = 0.1
+    RETRY_MAX_TOTAL_WAIT: float = 120.0
+
     database_url: str = "sqlite:///./agentic.db"
     mongodb_uri: str = ""
     mongodb_db: str = "agentic"
@@ -70,7 +98,7 @@ class Settings(BaseSettings):
     celery_backend_url: str = "rpc://"
 
     openai_model: str = "qwen3:8b"
-    openai_base_url: str = "http://192.168.0.118:11434/v1"
+    openai_base_url: str = "http://localhost:11434/v1"
     openai_api_key: str = "ollama"
 
     langsmith_project: str = "agentic-system"
@@ -81,7 +109,7 @@ class Settings(BaseSettings):
     helicone_enabled: bool = False
 
     llm_model: str = "qwen3:8b"
-    ollama_base_url: str = "http://192.168.0.118:11434"
+    ollama_base_url: str = "http://localhost:11434"
     ollama_chat_model: str = "qwen3:8b"
     ollama_agent_model: str = "llama3.1:8b"
     ollama_coder_model: str = "qwen3:8b"

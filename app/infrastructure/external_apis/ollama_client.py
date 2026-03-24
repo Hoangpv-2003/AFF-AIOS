@@ -17,7 +17,7 @@ class OllamaLLMClient:
     last_debug: Optional[Dict[str, object]] = None
 
     def _models_in_order(
-        self,
+        self    ,
         override_model: Optional[str] = None,
     ) -> List[str]:
         if override_model:
@@ -35,21 +35,14 @@ class OllamaLLMClient:
         model: Optional[str] = None,
         response_format: Optional[str] = None,
     ) -> str:
-        final_prompt = (
-            prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
-        )
-        last_error: Optional[Exception] = None
+        final_prompt = prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
         attempts: List[Dict[str, object]] = []
+        last_error: Optional[Exception] = None
         for candidate in self._models_in_order(override_model=model):
             try:
-                payload = {
-                    "model": candidate,
-                    "prompt": final_prompt,
-                    "stream": False,
-                }
+                payload = {"model": candidate, "prompt": final_prompt, "stream": False}
                 if response_format:
                     payload["format"] = response_format
-
                 response = httpx.post(
                     f"{self.base_url.rstrip('/')}/api/generate",
                     json=payload,
@@ -58,46 +51,51 @@ class OllamaLLMClient:
                 response.raise_for_status()
                 data = response.json()
                 text = str(data.get("response", "")).strip()
-                attempts.append(
-                    {
-                        "model": candidate,
-                        "ok": bool(text),
-                        "status_code": response.status_code,
-                        "response_chars": len(text),
-                    }
-                )
+                attempts.append({"model": candidate, "ok": bool(text)})
                 if text:
-                    self.last_debug = {
-                        "used_model": candidate,
-                        "attempts": attempts,
-                        "error": None,
-                    }
+                    self.last_debug = {"used_model": candidate, "attempts": attempts, "error": None}
                     return text
-            except Exception as exc:  # pragma: no cover
-                attempts.append(
-                    {
-                        "model": candidate,
-                        "ok": False,
-                        "error": str(exc),
-                    }
-                )
+            except Exception as exc:
+                attempts.append({"model": candidate, "ok": False, "error": str(exc)})
                 last_error = exc
                 continue
+        self.last_debug = {"used_model": None, "attempts": attempts, "error": str(last_error)}
+        raise RuntimeError(f"Ollama generate failed: {last_error}")
 
-        self.last_debug = {
-            "used_model": None,
-            "attempts": attempts,
-            "error": (
-                str(last_error)
-                if last_error is not None
-                else "no response"
-            ),
-        }
-        if last_error is not None:
-            raise RuntimeError(
-                f"Ollama generate failed: {last_error}"
-            ) from last_error
-        raise RuntimeError("Ollama generate failed: no response")
+    async def generate_async(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        response_format: Optional[str] = None,
+    ) -> str:
+        # (Already added in previous step, ensuring consistency)
+        final_prompt = prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
+        attempts: List[Dict[str, object]] = []
+        last_error: Optional[Exception] = None
+        for candidate in self._models_in_order(override_model=model):
+            try:
+                payload = {"model": candidate, "prompt": final_prompt, "stream": False}
+                if response_format:
+                    payload["format"] = response_format
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(
+                        f"{self.base_url.rstrip('/')}/api/generate",
+                        json=payload,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                text = str(data.get("response", "")).strip()
+                attempts.append({"model": candidate, "ok": bool(text)})
+                if text:
+                    self.last_debug = {"used_model": candidate, "attempts": attempts, "error": None}
+                    return text
+            except Exception as exc:
+                attempts.append({"model": candidate, "ok": False, "error": str(exc)})
+                last_error = exc
+                continue
+        self.last_debug = {"used_model": None, "attempts": attempts, "error": str(last_error)}
+        raise RuntimeError(f"Ollama generate failed: {last_error}")
 
     def get_last_debug(self) -> Dict[str, object]:
         return dict(self.last_debug or {})
@@ -119,3 +117,13 @@ class OllamaEmbeddingClient:
         data = response.json()
         embedding = data.get("embedding") or []
         return [float(value) for value in embedding]
+
+    async def embed_async(self, text: str) -> List[float]:
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(
+                f"{self.base_url.rstrip('/')}/api/embeddings",
+                json={"model": self.embedding_model, "prompt": text},
+            )
+        response.raise_for_status()
+        data = response.json()
+        return [float(v) for v in (data.get("embedding") or [])]

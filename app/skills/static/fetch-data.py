@@ -72,3 +72,17 @@ def run(input_data: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]
             "source_urls": [],
             "collected_at": datetime.now(timezone.utc).isoformat(),
         }
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+    # Read input from stdin if piped, else argv[1]
+    input_str = sys.argv[1] if len(sys.argv) > 1 else "{}"
+    try:
+        input_data = json.loads(input_str)
+    except:
+        input_data = {}
+    
+    result = run(input_data)
+    print(json.dumps(result, ensure_ascii=False))

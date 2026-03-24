@@ -86,7 +86,7 @@ class BaseAgent(abc.ABC):
         )
 
     @abc.abstractmethod
-    def act(
+    async def act(
         self,
         context: AgentContext,
         inputs: Dict[str, Any],

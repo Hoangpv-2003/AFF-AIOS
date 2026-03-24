@@ -43,6 +43,7 @@ class CoderArtifact(BaseModel):
     files: list[str] = Field(default_factory=list)
     rationale: str
     generated_code: str = ""
+    schema_json: str = ""
 
 
 class ReviewVerdict(BaseModel):

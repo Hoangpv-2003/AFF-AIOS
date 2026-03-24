@@ -12,6 +12,8 @@ from app.brain.memory import MemoryQuery, MemoryRecord, MemorySearchResult, Vect
 
 class EmbeddingClient(Protocol):
     def embed(self, text: str) -> List[float]:
+        ...
+    async def embed_async(self, text: str) -> List[float]:
         ... 
 
 
@@ -60,9 +62,9 @@ class RAGService:
             deduped.append(item)
         return deduped
 
-    def ingest(self, record_id: str, text: str, metadata: Optional[Dict[str, object]] = None) -> None:
+    async def ingest(self, record_id: str, text: str, metadata: Optional[Dict[str, object]] = None) -> None:
         normalized_text = self._normalize_text(text)
-        embedding = self.embedding_client.embed(normalized_text)
+        embedding = await self.embedding_client.embed_async(normalized_text)
         record = MemoryRecord(
             id=record_id,
             text=text.strip(),
@@ -72,7 +74,7 @@ class RAGService:
         )
         self.vector_store.upsert([record])
 
-    def retrieve(
+    async def retrieve(
         self,
         query_text: str,
         top_k: int = 3,
@@ -82,7 +84,7 @@ class RAGService:
         use_recency_boost: bool = True,
     ) -> List[MemorySearchResult]:
         normalized_query = self._normalize_text(query_text)
-        embedding = self.embedding_client.embed(normalized_query)
+        embedding = await self.embedding_client.embed_async(normalized_query)
         recency_boost = 0.15 if use_recency_boost else 0.0
         query = MemoryQuery(
             query_text=normalized_query,
@@ -107,7 +109,7 @@ class RAGService:
             raw = boosted
         return raw[:top_k]
 
-    def build_context(
+    async def build_context(
         self,
         query_text: str,
         top_k: int = 3,
@@ -115,7 +117,7 @@ class RAGService:
         include_metadata: bool = False,
         max_chars: Optional[int] = None,
     ) -> str:
-        results = self.retrieve(
+        results = await self.retrieve(
             query_text=query_text,
             top_k=top_k,
             filters=filters,
@@ -140,7 +142,7 @@ class RAGService:
             current_len += len(line) + 1
         return "\n".join(parts)
 
-    def build_grouped_context(
+    async def build_grouped_context(
         self,
         query_text: str,
         user_id: Optional[str] = None,
@@ -156,14 +158,14 @@ class RAGService:
         chat_filters = dict(base_filter)
         chat_filters["type"] = "chat"
 
-        facts = self.build_context(
+        facts = await self.build_context(
             query_text=query_text,
             top_k=facts_top_k,
             filters=fact_filters,
             include_metadata=False,
             max_chars=max(600, self.max_context_chars // 2),
         )
-        chats = self.build_context(
+        chats = await self.build_context(
             query_text=query_text,
             top_k=chats_top_k,
             filters=chat_filters,

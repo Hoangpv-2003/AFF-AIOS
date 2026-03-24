@@ -16,6 +16,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
+import sys
+import json
+from app.infrastructure.sandboxes.runner import LocalSandboxRunner
+from app.infrastructure.sandboxes.models import SandboxRequest
 
 logger = logging.getLogger("aaf.scheduler")
 
@@ -209,16 +213,39 @@ class JobScheduler:
             logger.error("Skill not found: %s", skill_name)
             return
 
-        module_name = f"aaf_sched_{uuid.uuid4().hex[:8]}"
-        spec = importlib.util.spec_from_file_location(module_name, impl_path)
-        if spec is None or spec.loader is None:
-            return
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
-        run_fn = getattr(module, "run", None)
-        if callable(run_fn):
-            result = run_fn(input_data=parameters)
-            logger.info("Skill %s result: %s", skill_name, result.get("status"))
+        # SECURE EXECUTION VIA SANDBOX
+        try:
+            wrapper_path = root / "app" / "infrastructure" / "sandboxes" / "skill_wrapper.py"
+            if not wrapper_path.exists():
+                logger.error("Sandbox wrapper not found at %s", wrapper_path)
+                return
+
+            input_json = json.dumps(parameters, ensure_ascii=False)
+
+            request = SandboxRequest(
+                skill_id=skill_name,
+                command=sys.executable,
+                args=[str(wrapper_path), str(impl_path), input_json],
+                timeout_seconds=60,
+                memory_mb_limit=512,
+                requires_network=True,
+            )
+
+            runner = LocalSandboxRunner()
+            sb_result = runner.run(request)
+
+            if not sb_result.success:
+                logger.error("Sandbox error for %s: %s", skill_name, sb_result.stderr)
+                return
+
+            try:
+                result = json.loads(sb_result.stdout.strip())
+                logger.info("Skill %s result: %s", skill_name, result.get("status"))
+            except json.JSONDecodeError:
+                logger.error("Failed to parse output for %s: %s", skill_name, sb_result.stdout[:500])
+
+        except Exception as exc:
+            logger.error("Execution failed for %s: %s", skill_name, exc)
 
     def _persist(self, job: ScheduledJob) -> None:
         try:

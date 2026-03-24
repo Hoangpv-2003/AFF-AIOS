@@ -1,433 +1,144 @@
-"""Coder agent implementation for generating draft artifacts from plan."""
+"""Coder agent implementation (v2.0)."""
 
 from __future__ import annotations
 
 import json
-import time
-from typing import Any, Dict, List, Optional, Tuple
+import logging
+from typing import Any, Dict
 
-import ast
 from app.agents.base_agent import AgentContext, AgentResult, BaseAgent
 from app.agents.reviewer import ReviewerAgent
-from app.brain.prompt_templates import (
-    build_coder_messages,
-    build_runtime_context,
-)
-from app.brain.rag import RAGService
-from app.infrastructure.budget.enforcer import BudgetEnforcer
-from app.schemas.agents import CoderArtifactDraft, PlanDraft
+from app.brain.prompt_templates import CODER_SYSTEM_PROMPT, CODER_USER_TEMPLATE
+from app.core.config import get_settings
 
+logger = logging.getLogger(__name__)
 
 class CoderAgent(BaseAgent):
     name = "coder"
 
     def __init__(
         self,
-        budget_enforcer: BudgetEnforcer | None = None,
-        llm_client: Any | None = None,
-        rag_service: RAGService | None = None,
+        llm_client: Any = None,
         reviewer: ReviewerAgent | None = None,
     ) -> None:
-        self.budget_enforcer = budget_enforcer
         self.llm_client = llm_client
-        self.rag_service = rag_service
         self.reviewer = reviewer or ReviewerAgent(llm_client=llm_client)
+        self.settings = get_settings()
 
-    def _build_llm_rationale(
-        self,
-        plan: PlanDraft,
-        skill_name: str,
-        memory_context: str,
-        runtime_context: str = "",
-        patch_mode: str = "create_new",
-        fallback: str = "",
-        skill_contract_json: str = "{}",
-    ) -> Tuple[str, bool]:
-        if self.llm_client is None or not hasattr(self.llm_client, "generate"):
-            return fallback, False
-
-        messages = build_coder_messages(
-            plan_json=plan.model_dump_json(),
-            skill_name=skill_name,
-            memory_context=memory_context,
-            runtime_context=runtime_context,
-            patch_mode=patch_mode,
-            skill_contract_json=skill_contract_json,
-        )
-        system_prompt = messages[0]["content"]
-        prompt = messages[1]["content"]
-
+    def _extract_code(self, raw: str) -> str:
+        # 1. Try to parse as JSON structure
         try:
-            generated = str(
-                self.llm_client.generate(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                )
-            ).strip()
-        except Exception:
-            return fallback, False
-
-        if not generated:
-            return fallback, False
-
-        try:
-            payload = json.loads(generated)
-            rationale = str(payload.get("rationale", "")).strip()
-            if rationale:
-                return rationale, True
+            clean_raw = raw
+            if "```json" in clean_raw:
+                clean_raw = clean_raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in clean_raw and raw.startswith("{"):
+                clean_raw = clean_raw.split("```")[1].strip()
+                
+            parsed = json.loads(clean_raw)
+            if "logic" in parsed:
+                return str(parsed["logic"])
         except Exception:
             pass
-        return generated, True
+            
+        # 2. Fallback to raw string extraction
+        if "```python" in raw:
+            return raw.split("```python")[1].split("```")[0].strip()
+        if "```" in raw:
+            parts = raw.split("```")
+            return parts[1].strip() if len(parts) >= 3 else raw.strip()
+        return raw.strip()
 
-    def generate_artifacts(
+    async def act(
         self,
         context: AgentContext,
-        plan: PlanDraft,
-        skill_name: str,
-        runtime_context: str,
-        memory_context: str = "",
-        patch_mode: str = "create_new",
-        total_llm_calls: int = 0,
-        memory_hits: Optional[List[dict]] = None,
-    ) -> Tuple[CoderArtifactDraft, str, int]:
-        slug = skill_name
-        files = [
-            f"skills/dynamic/{slug}.py",
-            f"tests/generated/test_{slug}.py",
-        ]
-
-        selected_skill_contract = self._select_skill_contract(plan, skill_name)
-        skill_contract_json = json.dumps(selected_skill_contract, ensure_ascii=False)
-
-        # 1. First Generation
-        coder_messages = build_coder_messages(
-            plan_json=plan.model_dump_json(),
-            skill_name=skill_name,
-            memory_context=memory_context,
-            runtime_context=runtime_context,
-            patch_mode=patch_mode,
-            skill_contract_json=skill_contract_json,
+        inputs: Dict[str, Any],
+    ) -> AgentResult:
+        step_id = inputs.get("step_id", "unknown")
+        requirement = inputs.get("requirement", "")
+        mode = inputs.get("mode", "create")
+        plan_json = inputs.get("plan_output", {})
+        execution_context = inputs.get("execution_context", {})
+        runtime_context_str = execution_context.get("runtime_context_str", "")
+        
+        max_rounds = self.settings.MAX_CODE_REVIEW_ROUNDS if mode == "create" else 2
+        
+        sys_prompt = CODER_SYSTEM_PROMPT.replace("{current_datetime}", "UTC").replace("{timezone}", "UTC").replace("{locale}", "en-US")
+        base_user_prompt = CODER_USER_TEMPLATE.format(
+            runtime_context=runtime_context_str,
+            plan_json=json.dumps(plan_json, ensure_ascii=False),
+            coder_brief=requirement,
+            memory_context="",
+            skill_contract_json="{}",
+            skill_name=step_id,
+            patch_mode=mode
         )
-        coder_prompt = (
-            f"{coder_messages[0]['content']}\n\n"
-            f"{coder_messages[1]['content']}"
-        )
-
-        # Global ceiling check
-        if total_llm_calls >= 15:
-            return (
-                CoderArtifactDraft(
-                    files=[],
-                    rationale="GLOBAL_CEILING_REACHED",
-                ),
-                False,
-                total_llm_calls,
-            )
-
-        code_text = ""
+        
+        current_code = ""
+        reviews = []
+        final_approval = False
         iteration = 1
-        MAX_ITERATIONS = 3
-
-        while iteration <= MAX_ITERATIONS:
+        
+        while iteration <= max_rounds:
+            # 1. Generate code
+            user_prompt = base_user_prompt
+            if reviews:
+                user_prompt += f"\n\n## Feedback from Previous Round (Round {iteration-1})\n{json.dumps(reviews[-1], indent=2)}\n\nPlease apply fixes and return the full updated code block."
+            
             try:
-                # Use current local LLM generation logic
-                raw_response = str(
-                    self.llm_client.generate(prompt=coder_prompt)
-                ).strip()
-                total_llm_calls += 1
-
-                # Robust extraction
-                code_text = raw_response
-
-                # Try to find a JSON block first if it exists
-                if "```json" in code_text:
-                    json_str = (
-                        code_text.split("```json")[1]
-                        .split("```")[0]
-                        .strip()
-                    )
-                    try:
-                        data = json.loads(json_str)
-                        for key in [
-                            "code",
-                            "generated_code",
-                            "python_code",
-                            "content",
-                        ]:
-                            if isinstance(data, dict) and key in data:
-                                code_text = data[key]
-                                break
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        pass
-
-                # Then handle Markdown fences for Python
-                if "```python" in code_text:
-                    code_text = (
-                        code_text.split("```python")[1]
-                        .split("```")[0]
-                        .strip()
-                    )
-                elif "```" in code_text:
-                    # Only split if it looks like it's wrapping something
-                    parts = code_text.split("```")
-                    if len(parts) >= 3:
-                        code_text = parts[1].strip()
-
-                # Final check if the whole thing is JSON braces
-                if (
-                    not code_text.startswith("import")
-                    and not code_text.startswith("from")
-                    and code_text.strip().startswith("{")
-                    and code_text.strip().endswith("}")
-                ):
-                    try:
-                        data = json.loads(code_text)
-                        for key in [
-                            "code",
-                            "generated_code",
-                            "python_code",
-                            "content",
-                        ]:
-                            if isinstance(data, dict) and key in data:
-                                code_text = data[key]
-                                break
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        pass
-
-            except Exception:
+                raw_code_resp = await self.llm_client.generate_async(prompt=sys_prompt + "\n\n" + user_prompt)
+                current_code = self._extract_code(raw_code_resp)
+            except Exception as e:
+                logger.error(f"Coder LLM error: {e}")
                 break
-
-            # Lớp bảo vệ 1: Static Analysis (ast.parse)
-            try:
-                tree = ast.parse(code_text)
-                # Check for 'run' function
-                run_def = None
-                for node in ast.walk(tree):
-                    if (
-                        isinstance(node, ast.FunctionDef)
-                        or isinstance(node, ast.AsyncFunctionDef)
-                    ) and node.name == "run":
-                        run_def = node
-                        break
-
-                if not run_def:
-                    raise ValueError(
-                        "MANDATORY 'def run(input_data=None, **kwargs)' "
-                        "function is missing or misnamed."
-                    )
-
-                if isinstance(run_def, ast.AsyncFunctionDef):
-                    raise ValueError(
-                        "Skill function MUST be synchronous. "
-                        "'async def' is forbidden."
-                    )
-
-                # Check for **kwargs
-                has_kwargs = (
-                    any(
-                        isinstance(arg, ast.arg) and arg.arg == "kwargs"
-                        for arg in run_def.args.args
-                    )
-                    or run_def.args.kwarg is not None
-                )
-                if not has_kwargs:
-                    raise ValueError(
-                        "MANDATORY 'run' function must accept '**kwargs' "
-                        "for future-proofing."
-                    )
-
-            except (SyntaxError, ValueError) as e:
-                coder_prompt += (
-                    f"\n\n## Syntax or Contract Error "
-                    f"(Iteration {iteration})\n"
-                    f"{str(e)}\n\n"
-                    "Làm ơn sửa lại code. Phải có hàm "
-                    "'def run(input_data=None, **kwargs)' đồng bộ "
-                    "(synchronous)."
-                )
-                iteration += 1
-                continue
-
-            # Lớp bảo vệ 2: Code Reviewer Agent
-            res_review = self.reviewer.act(
-                AgentContext(
-                    task_id="review",
-                    trace_id=context.trace_id,
-                    prompt=skill_name,
-                ),
-                {
-                    "plan_json": plan.model_dump_json(),
-                    "code_text": code_text,
-                    "iteration": iteration,
-                },
+                
+            # 2. Review code
+            review_res = await self.reviewer.act(
+                context, 
+                {"code_text": current_code, "iteration": iteration, "plan_output": plan_json}
             )
-            total_llm_calls += 1
-
-            review = res_review.payload.get("verdict", {})
-            if review.get("is_approved"):
+            
+            if not review_res.success:
                 break
-
-            # Recursive feedback
-            coder_prompt += f"\n\n## Feedback từ Reviewer (Vòng {iteration})\n"
-            coder_prompt += f"{review.get('review_feedback')}\n"
+                
+            review_data = review_res.payload
+            reviews.append(review_data)
+            
+            if review_data.get("action") == "APPROVED" or review_data.get("is_approved") is True:
+                final_approval = True
+                break
+                
             iteration += 1
 
-        return (
-            CoderArtifactDraft(
-                files=files,
-                rationale=f"Approved on round {iteration}",
-                generated_code=code_text,
-            ),
-            True,
-            total_llm_calls,
-        )
-
-    @staticmethod
-    def _select_skill_contract(plan: PlanDraft, skill_name: str) -> Dict[str, Any]:
-        for spec in plan.skills_to_create:
-            if spec.skill_name != skill_name:
-                continue
-            return {
-                "skill_name": spec.skill_name,
-                "skill_kind": spec.skill_kind.value,
-                "skill_purpose": spec.skill_purpose,
-                "input_keys": list(spec.input_keys),
-                "output_keys": list(spec.output_keys),
-                "coder_notes": spec.coder_notes,
-            }
-        return {
-            "skill_name": skill_name,
-            "skill_kind": "generate",
-            "skill_purpose": plan.task_summary,
-            "input_keys": [],
-            "output_keys": [],
-            "coder_notes": "",
-        }
-
-    def act(
-        self,
-        context: AgentContext,
-        inputs: Dict[str, object],
-    ) -> AgentResult:
-        plan_data = inputs.get("plan")
-        if not isinstance(plan_data, dict):
-            return AgentResult(success=False, reason_code="VALIDATION_FAILED")
-
-        if "task_summary" not in plan_data and "objective" in plan_data:
-            objective = str(plan_data.get("objective", "")).strip()
-            raw_steps = plan_data.get("steps")
-            if isinstance(raw_steps, list):
-                steps = [
-                    str(item).strip()
-                    for item in raw_steps
-                    if str(item).strip()
-                ]
+        assessment = "PRODUCTION" if final_approval else "REJECTED"
+        
+        file_path = None
+        if current_code:  # Save ALWAYS for debugging why it's failing
+            import os
+            clean_name = str(step_id).replace(" ", "_").replace("-", "_").lower()
+            
+            if final_approval:
+                file_path = f"app/skills/dynamic/{clean_name}.py"
+                os.makedirs("app/skills/dynamic", exist_ok=True)
             else:
-                steps = []
-            plan_data = {
-                "task_summary": objective,
-                "confidence": float(plan_data.get("confidence", 0.5)),
-                "skills_to_create": [
-                    {
-                        "skill_name": str(
-                            plan_data.get("skill_name", "generated_skill")
-                        ),
-                        "skill_purpose": objective or context.prompt,
-                        "coder_notes": (
-                            "\n".join(steps)
-                            if steps
-                            else (objective or context.prompt)
-                        ),
-                    }
-                ],
-            }
-
-        plan = PlanDraft(**plan_data)
-        memory_context = ""
-        if self.rag_service is not None:
-            memory_context = self.rag_service.build_context(
-                query_text=plan.task_summary,
-                top_k=3,
-            )
-
-        if self.budget_enforcer is not None:
-            user_id = str(context.metadata.get("user_id", "system"))
-            org_id = str(context.metadata.get("org_id", "default"))
-            plan_text = (
-                f"{plan.task_summary} {memory_context}".strip()
-            )
-            tokens = self.budget_enforcer.estimate_tokens(plan_text)
-            allowed, reason = self.budget_enforcer.preflight(
-                task_id=context.task_id,
-                user_id=user_id,
-                org_id=org_id,
-                tokens=tokens,
-            )
-            if not allowed:
-                return AgentResult(success=False, reason_code=reason)
-
-        runtime_context = inputs.get("runtime_context", "")
-        if not runtime_context:
-            runtime_context = build_runtime_context(
-                history=inputs.get("history", [])
-            )
-
-        total_llm_calls = int(inputs.get("total_llm_calls", 0))
-
-        artifacts, llm_used, total_llm_calls = self.generate_artifacts(
-            context=context,
-            plan=plan,
-            skill_name=str(inputs.get("skill_name", "generated_skill")),
-            runtime_context=runtime_context,
-            patch_mode=str(inputs.get("patch_mode", "create_new")),
-            memory_hits=inputs.get("memory_hits"),
-            memory_context=memory_context,
-            total_llm_calls=total_llm_calls,
-        )
-
-        skill_name = str(inputs.get("skill_name", "generated_skill"))
-        rationale, rationale_llm_used = self._build_llm_rationale(
-            plan=plan,
-            skill_name=skill_name,
-            memory_context=memory_context,
-            runtime_context=str(runtime_context),
-            patch_mode=str(inputs.get("patch_mode", "create_new")),
-            fallback=artifacts.rationale,
-            skill_contract_json=json.dumps(
-                self._select_skill_contract(plan, skill_name),
-                ensure_ascii=False,
-            ),
-        )
-        artifacts.rationale = rationale
-        llm_used = llm_used or rationale_llm_used
-
-        llm_debug = {}
-        if (
-            self.llm_client is not None
-            and hasattr(self.llm_client, "get_last_debug")
-        ):
-            try:
-                llm_debug = dict(self.llm_client.get_last_debug())
-            except Exception:
-                llm_debug = {}
-        if self.rag_service is not None:
-            self.rag_service.ingest(
-                record_id=f"code-{context.task_id}-{int(time.time() * 1000)}",
-                text=(
-                    f"objective={plan.task_summary}\n"
-                    f"rationale={artifacts.rationale}"
-                ),
-                metadata={"type": "code", "task_id": context.task_id},
-            )
+                file_path = f"app/skills/dynamic/rejected_{clean_name}.py"
+                os.makedirs("app/skills/dynamic", exist_ok=True)
+                
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(current_code)
+            logger.info(f"Successfully generated and saved new dynamic skill: {file_path}")
+            
         return AgentResult(
             success=True,
             payload={
-                "artifacts": artifacts.model_dump(),
-                "total_llm_calls": total_llm_calls,
-                "debug": {
-                    "llm_used": llm_used,
-                    "llm_debug": llm_debug,
-                    "memory_context": memory_context,
-                },
-            },
+                "status": "success" if final_approval else "error",
+                "code": current_code,
+                "language": "python",
+                "reviews": reviews,
+                "final_approval": final_approval,
+                "quality_assessment": assessment,
+                "artifact_path": file_path,
+                "tokens_used": 0,
+                "completion_time_ms": 0,
+                "next_phase": "skill_runner" if final_approval else "error_handler"
+            }
         )

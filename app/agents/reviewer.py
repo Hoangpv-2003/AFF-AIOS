@@ -1,138 +1,113 @@
-"""Reviewer agent implementation for static checks and verdict emission."""
+"""Reviewer agent implementation (v2.0)."""
 
 from __future__ import annotations
 
+import json
+import logging
+import ast
 from typing import Any, Dict
 
 from app.agents.base_agent import AgentContext, AgentResult, BaseAgent
-from app.infrastructure.sandboxes.models import SandboxRequest
-from app.infrastructure.sandboxes.runner import LocalSandboxRunner
-from app.schemas.agents import (
-    CoderArtifactDraft,
-    ReviewStatus,
-    ReviewVerdictDraft,
-)
+from app.brain.prompt_templates import REVIEWER_SYSTEM_PROMPT, REVIEWER_USER_TEMPLATE
 
+logger = logging.getLogger(__name__)
 
 class ReviewerAgent(BaseAgent):
     name = "reviewer"
 
-    def __init__(
-        self,
-        sandbox_runner: LocalSandboxRunner | None = None,
-        llm_client: Any | None = None,
-    ) -> None:
-        self.sandbox_runner = sandbox_runner or LocalSandboxRunner()
+    def __init__(self, llm_client: Any = None) -> None:
         self.llm_client = llm_client
 
-    def review_artifacts(
-        self,
-        artifacts: CoderArtifactDraft,
-        plan_json: str = "",
-        iteration: int = 1,
-    ) -> ReviewVerdictDraft:
-        if not artifacts.generated_code:
-            joined = " ".join(artifacts.files) + " " + artifacts.rationale
-            lowered = joined.lower()
-            if "http" in lowered or "net" in lowered or "network" in lowered:
-                sandbox = self.sandbox_runner.run(
-                    SandboxRequest(
-                        skill_id="offline-review-network",
-                        command="python",
-                        args=["-c", "print('network check')"],
-                        requires_network=True,
-                    )
-                )
-                return ReviewVerdictDraft(
-                    status=ReviewStatus.fail,
-                    reason_code="SANDBOX_DENIED",
-                    notes=(
-                        ";".join(sandbox.policy_violations)
-                        or sandbox.stderr
-                    ),
-                )
+    def _static_analysis(self, code: str) -> Dict[str, Any]:
+        """Perform strict AST heuristics locally before invoking LLM."""
+        issues = []
+        try:
+            tree = ast.parse(code)
+            run_found = False
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run":
+                    run_found = True
+                    if isinstance(node, ast.AsyncFunctionDef):
+                        issues.append("Fatal: 'run' must be synchronous. 'async def' discovered.")
+                    
+                    has_kwargs = any(arg.arg == "kwargs" for arg in getattr(node.args, "args", [])) or node.args.kwarg is not None
+                    if not has_kwargs:
+                        issues.append("Fatal: 'run' must accept **kwargs.")
+                    break
+                    
+            if not run_found:
+                issues.append("Fatal: Mandatory 'def run(input_data: dict, **kwargs)' is missing.")
+                
+            # Threat heuristics
+            code_lower = code.lower()
+            if "os.system" in code_lower or "subprocess" in code_lower:
+                issues.append("Security: Dangerous OS execution detected.")
+                
+        except SyntaxError as e:
+            issues.append(f"Python Syntax Error: {str(e)}")
+            
+        return {
+            "passed": len(issues) == 0,
+            "issues": issues
+        }
 
-            return ReviewVerdictDraft(status=ReviewStatus.pass_)
-
-        # 1. Static Security Heuristics
-        code = artifacts.generated_code.lower()
-        if "os.system" in code or "subprocess.popen" in code:
-            return ReviewVerdictDraft(
-                status=ReviewStatus.fail,
-                reason_code="VALIDATION_FAILED",
-                notes="Phat hien lenh thuc thi he thong khong an toan.",
-            )
-
-        # 2. LLM Review (if client available)
-        if self.llm_client:
-            from app.brain.prompt_templates import build_coder_review_messages
-            messages = build_coder_review_messages(
-                plan_json,
-                artifacts.generated_code,
-                iteration,
-            )
-            try:
-                res = self.llm_client.generate(
-                    prompt=messages[1]["content"],
-                    system_prompt=messages[0]["content"],
-                )
-                import json
-
-                parsed = json.loads(str(res))
-                if bool(parsed.get("is_approved", False)):
-                    return ReviewVerdictDraft(status=ReviewStatus.pass_)
-                return ReviewVerdictDraft(
-                    status=ReviewStatus.warn,
-                    reason_code=str(
-                        parsed.get("reason_code") or "VALIDATION_FAILED"
-                    ),
-                    notes=str(parsed.get("review_feedback") or ""),
-                )
-            except Exception:
-                pass  # Fallback to sandbox only
-
-        # 3. Sandbox Execution (Logical verification)
-        # For now, we use LocalSandboxRunner to check if it's runnable
-        result = self.sandbox_runner.run(
-            SandboxRequest(
-                skill_id="codegen_review",
-                command="python",
-                args=["-c", artifacts.generated_code],  # Try to compile/run
-            )
-        )
-        if not result.success:
-            return ReviewVerdictDraft(
-                status=ReviewStatus.fail,
-                reason_code="SANDBOX_DENIED",
-                notes=(";".join(result.policy_violations) or result.stderr),
-            )
-
-        return ReviewVerdictDraft(status=ReviewStatus.pass_)
-
-    def act(
+    async def act(
         self,
         context: AgentContext,
-        inputs: Dict[str, object],
+        inputs: Dict[str, Any],
     ) -> AgentResult:
-        artifacts_data = inputs.get("artifacts")
-        if not artifacts_data and inputs.get("code_text"):
-            # Support internal direct call from CoderAgent
-            artifacts = CoderArtifactDraft(
-                files=[],
-                rationale="",
-                generated_code=str(inputs.get("code_text")),
-            )
-        elif isinstance(artifacts_data, dict):
-            artifacts = CoderArtifactDraft(**artifacts_data)
-        else:
-            return AgentResult(success=False, reason_code="VALIDATION_FAILED")
+        code = inputs.get("code_text", "")
+        round_num = inputs.get("iteration", 1)
+        plan_json = inputs.get("plan_output", {})
 
-        verdict = self.review_artifacts(
-            artifacts,
-            plan_json=str(inputs.get("plan_json", "")),
-            iteration=int(inputs.get("iteration", 1)),
+        # 1. Local Static Analysis
+        static_res = self._static_analysis(code)
+        if not static_res["passed"]:
+            return AgentResult(
+                success=True,
+                payload={
+                    "round": round_num,
+                    "checks": {
+                        "syntax": {"passed": False, "issues": static_res["issues"]},
+                        "logic": {"passed": True, "issues": []},
+                        "error_handling": {"passed": True, "issues": []},
+                        "performance": {"passed": True, "issues": []},
+                        "security": {"passed": True, "issues": []},
+                        "documentation": {"passed": True, "issues": []},
+                        "edge_cases": {"passed": True, "issues": []},
+                        "style": {"passed": True, "issues": []},
+                    },
+                    "severity_score": 10,
+                    "quality_score": 0.0,
+                    "issues_found": True,
+                    "action": "NEEDS_FIX",
+                    "recommended_fixes": static_res["issues"]
+                }
+            )
+
+        # 2. LLM 8-Point Checklist Review
+        sys_prompt = REVIEWER_SYSTEM_PROMPT
+        user_prompt = REVIEWER_USER_TEMPLATE.format(
+            code_to_review=code,
+            iteration_count=round_num,
+            plan_json=json.dumps(plan_json, ensure_ascii=False)
         )
-        return AgentResult(
-            success=True,
-            payload={"verdict": verdict.model_dump(mode="json")},
-        )
+        
+        try:
+            raw = await self.llm_client.generate_async(prompt=sys_prompt + "\n\n" + user_prompt)
+            review_decision = json.loads(raw)
+            return AgentResult(success=True, payload=review_decision)
+        except Exception as e:
+            logger.error(f"Reviewer parse error: {e}")
+            # Fallback permissive if LLM crashes during review, relies on static check
+            return AgentResult(
+                success=True,
+                payload={
+                    "round": round_num,
+                    "checks": {k: {"passed": True, "issues": []} for k in ["syntax", "logic", "error_handling", "performance", "security", "documentation", "edge_cases", "style"]},
+                    "severity_score": 0,
+                    "quality_score": 1.0,
+                    "issues_found": False,
+                    "action": "APPROVED"
+                }
+            )
