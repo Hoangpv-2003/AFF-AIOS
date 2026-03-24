@@ -13,6 +13,7 @@ from app.brain.memory import MemoryQuery, MemoryRecord, MemorySearchResult, Vect
 class EmbeddingClient(Protocol):
     def embed(self, text: str) -> List[float]:
         ...
+    """Embed text and return a list of floats."""
     async def embed_async(self, text: str) -> List[float]:
         ... 
 

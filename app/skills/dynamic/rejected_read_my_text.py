@@ -67,4 +67,4 @@ def run(input_data: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]
             'status': 'error',
             'summary': 'Unexpected error occurred',
             'error_reason': str(e)
-        ]
+        }

@@ -127,9 +127,27 @@ def _intent_from_parser_payload(message: str, parsed: dict) -> dict:
     if not any([base["wants_skill"], base["wants_report"], base["wants_image"], base["wants_schedule"], base["wants_email"]]):
         if action_type and action_type != "chat":
             base["wants_skill"] = True
-        if action_type in {"deliver", "schedule", "pipeline", "generate", "analyse", "retrieve", "mutate"}:
+        # Accept both old and new action_type vocabularies for backward compatibility
+        skill_action_types = {
+            "deliver",
+            "schedule",
+            "pipeline",
+            "generate",
+            "analyse",
+            "retrieve",
+            "mutate",
+            # new names
+            "create",
+            "read",
+            "transform",
+            "integrate",
+            "search",
+            "decide",
+            "debug",
+        }
+        if action_type in skill_action_types:
             base["wants_skill"] = True
-        if action_type == "deliver":
+        if action_type in {"deliver", "integrate"}:
             base["wants_email"] = True
         if action_type == "schedule":
             base["wants_schedule"] = True
